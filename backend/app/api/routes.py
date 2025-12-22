@@ -8,8 +8,10 @@ from app.core.image_manager import ensure_image
 import asyncio
 import time
 import hashlib
+import uuid
 
 from app.core.deploy_jobs import new_job, get_job, update_job, update_progress, set_progress_path
+import xml.etree.ElementTree as ET
 
 router = APIRouter()
 
@@ -131,6 +133,66 @@ def _is_opnsense_node(node: Any) -> bool:
         return False
     return ("opnsense" in img) or ("opnsense" in lbl)
 
+
+def _reuse_existing_network(net_name: str) -> bool:
+    """Best-effort: if a network with `net_name` already exists, ensure it's active/autostart.
+
+    Returns True if the existing network is found (and ensured active), else False.
+    """
+    try:
+        vm_manager.connect()
+        conn = vm_manager.conn
+        if conn is None:
+            return False
+        net = conn.networkLookupByName(net_name)
+        if net is not None:
+            if net.isActive() != 1:
+                net.create()
+            net.setAutostart(True)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _active_nat_third_octets() -> set[int]:
+    """Return third octets (X) for active libvirt NAT networks using 192.168.X.0/24."""
+    thirds: set[int] = set()
+    try:
+        vm_manager.connect()
+        conn = vm_manager.conn
+        if conn is None:
+            return thirds
+        for net_name in conn.listNetworks() or []:  # active networks only
+            try:
+                net = conn.networkLookupByName(net_name)
+                xml = net.XMLDesc(0)
+                root = ET.fromstring(xml)
+                ip_el = root.find("./ip")
+                if ip_el is None:
+                    continue
+                addr = (ip_el.get("address") or "").strip()
+                parts = addr.split(".")
+                if len(parts) == 4 and parts[0] == "192" and parts[1] == "168":
+                    thirds.add(int(parts[2]))
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return thirds
+
+
+def _pick_nat_third(seed: str, used: set[int]) -> int:
+    """Pick a free third octet in [10, 249] based on a stable seed."""
+    # Avoid very small subnets and leave room for cid probing.
+    start = 10 + (int(hashlib.sha1(seed.encode("utf-8")).hexdigest()[:4], 16) % 240)  # 10..249
+    for off in range(0, 240):
+        third = 10 + ((start - 10 + off) % 240)
+        if third not in used:
+            used.add(third)
+            return third
+    raise RuntimeError("No free NAT subnets available (192.168.10.0/24..192.168.249.0/24)")
+
 class VMCreateRequest(BaseModel):
     name: str
     memory_mb: int
@@ -151,10 +213,31 @@ class VMResponse(BaseModel):
     vnc_port: Optional[str]
     websocket_port: Optional[int] = None
 
+
+class VMInterfaceInfo(BaseModel):
+    name: Optional[str] = None
+    mac: Optional[str] = None
+    network: Optional[str] = None
+    ips: List[str] = []
+
+
+class VMRuntimeInfo(BaseModel):
+    name: str
+    interfaces: List[VMInterfaceInfo] = []
+
 @router.get("/vms", response_model=List[VMResponse])
 async def get_vms():
     try:
         return vm_manager.list_domains()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/runtime/vms", response_model=List[VMRuntimeInfo])
+async def get_runtime_vms():
+    try:
+        vms = vm_manager.list_domains_with_interfaces()
+        return vms
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -217,6 +300,8 @@ class ScenarioConfig(BaseModel):
     team: str
     objective: str
     difficulty: str
+    # Optional stable prefix for libvirt network names. If omitted, we auto-randomize per deploy.
+    network_prefix: Optional[str] = None
     # Optional mapping of image keys/filenames -> download source
     # Example:
     #   sources: {
@@ -224,6 +309,26 @@ class ScenarioConfig(BaseModel):
     #     "kali-linux": {"url": "https://.../kali.iso", "filename": "kali.iso"}
     #   }
     sources: Optional[Dict[str, object]] = None
+
+
+def _network_slug(scenario: Optional[ScenarioConfig], suffix: Optional[str]) -> str:
+    """Generate a network namespace slug.
+
+    - If `scenario.network_prefix` is set: use it as-is (slugified) for stable names.
+    - Otherwise: append a short suffix so repeated deploys don't collide.
+    """
+    base = None
+    if scenario is not None:
+        base = (scenario.network_prefix or scenario.name or "").strip()
+    if not base:
+        base = "topology"
+
+    slug_base = _slugify(base)
+    if scenario is not None and (scenario.network_prefix or "").strip():
+        return slug_base
+    suf = (suffix or uuid.uuid4().hex[:8]).strip()
+    suf = "".join([c for c in suf.lower() if c.isalnum()])[:8] or uuid.uuid4().hex[:8]
+    return f"{slug_base}-{suf}"
 
 class TopologyDeployRequest(BaseModel):
     scenario: Optional[ScenarioConfig] = None
@@ -241,13 +346,14 @@ async def deploy_topology(topology: TopologyDeployRequest):
     # Create/ensure networks so edge-connected components can talk.
     # If a component contains an OPNsense node, we create an isolated LAN network (no DHCP/NAT)
     # and attach OPNsense with WAN+LAN, while other nodes attach to LAN only.
-    scenario_name = (topology.scenario.name if topology.scenario else "topology")
-    slug = _slugify(scenario_name)
+    slug = _network_slug(topology.scenario, suffix=uuid.uuid4().hex[:8])
     node_ids = [n.id for n in topology.nodes]
     comp_map = _connected_components(node_ids, topology.edges)
     max_comp = max(comp_map.values()) if comp_map else 0
 
     opnsense_nodes = {n.id for n in topology.nodes if _is_opnsense_node(n)}
+
+    used_thirds = _active_nat_third_octets()
 
     for cid in range(0, max_comp + 1):
         members = [nid for nid, cc in comp_map.items() if cc == cid]
@@ -258,17 +364,17 @@ async def deploy_topology(topology: TopologyDeployRequest):
             h = hashlib.sha1(lan_name.encode("utf-8")).hexdigest()[:8]
             bridge = f"cr{h}{cid}"[:15]
             if not vm_manager.ensure_isolated_network(lan_name, bridge):
-                raise HTTPException(status_code=500, detail=f"Failed to create LAN network {lan_name}")
+                if not _reuse_existing_network(lan_name):
+                    raise HTTPException(status_code=500, detail=f"Failed to create LAN network {lan_name}")
         else:
             net_name = f"cyberange-{slug}-c{cid}"
             h = hashlib.sha1(net_name.encode("utf-8")).hexdigest()[:8]
             bridge = f"cr{h}{cid}"[:15]
-            third = 100 + cid
-            if third > 250:
-                raise HTTPException(status_code=400, detail="Topology too large: too many network segments")
+            third = _pick_nat_third(f"{slug}-c{cid}", used_thirds)
             gw = f"192.168.{third}.1"
             if not vm_manager.ensure_network(net_name, bridge, gw):
-                raise HTTPException(status_code=500, detail=f"Failed to create network {net_name}")
+                if not _reuse_existing_network(net_name):
+                    raise HTTPException(status_code=500, detail=f"Failed to create network {net_name}")
 
     for node in topology.nodes:
         packages = []
@@ -397,13 +503,14 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest):
         # Create/ensure networks so edge-connected components can talk.
         # If a component contains an OPNsense node, we create an isolated LAN network (no DHCP/NAT)
         # and attach OPNsense with WAN+LAN, while other nodes attach to LAN only.
-        scenario_name = (topology.scenario.name if topology.scenario else "topology")
-        slug = _slugify(scenario_name)
+        slug = _network_slug(topology.scenario, suffix=(job_id.split("-")[0] if job_id else None))
         node_ids = [n.id for n in topology.nodes]
         comp_map = _connected_components(node_ids, topology.edges)
         max_comp = max(comp_map.values()) if comp_map else 0
 
         opnsense_nodes = {n.id for n in topology.nodes if _is_opnsense_node(n)}
+
+        used_thirds = _active_nat_third_octets()
         for cid in range(0, max_comp + 1):
             members = [nid for nid, cc in comp_map.items() if cc == cid]
             has_opnsense = any(nid in opnsense_nodes for nid in members)
@@ -413,18 +520,18 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest):
                 bridge = f"cr{h}{cid}"[:15]
                 ok = vm_manager.ensure_isolated_network(lan_name, bridge)
                 if not ok:
-                    raise RuntimeError(f"Failed to create LAN network {lan_name}")
+                    if not _reuse_existing_network(lan_name):
+                        raise RuntimeError(f"Failed to create LAN network {lan_name}")
             else:
                 net_name = f"cyberange-{slug}-c{cid}"
                 h = hashlib.sha1(net_name.encode("utf-8")).hexdigest()[:8]
                 bridge = f"cr{h}{cid}"[:15]
-                third = 100 + cid
-                if third > 250:
-                    raise RuntimeError("Topology too large: too many network segments")
+                third = _pick_nat_third(f"{slug}-c{cid}", used_thirds)
                 gw = f"192.168.{third}.1"
                 ok = vm_manager.ensure_network(net_name, bridge, gw)
                 if not ok:
-                    raise RuntimeError(f"Failed to create network {net_name}")
+                    if not _reuse_existing_network(net_name):
+                        raise RuntimeError(f"Failed to create network {net_name}")
 
         # Pre-ensure any scenario sources referenced by nodes (cached; emits progress)
         sources = topology.scenario.sources if topology.scenario and topology.scenario.sources else {}

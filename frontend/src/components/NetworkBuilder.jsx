@@ -193,6 +193,14 @@ const getId = () => `dndnode_${id++}`;
 
 const API_URL = 'http://localhost:8001/api';
 
+const SCENARIO_DEFAULTS = {
+    name: 'New Scenario',
+    team: 'blue',
+    objective: 'Defend the network against incoming attacks.',
+    difficulty: 'easy',
+    network_prefix: ''
+};
+
 const NetworkBuilder = () => {
   const reactFlowWrapper = useRef(null);
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
@@ -200,13 +208,11 @@ const NetworkBuilder = () => {
   const [reactFlowInstance, setReactFlowInstance] = useState(null);
   const [selectedNode, setSelectedNode] = useState(null);
   const [availableImages, setAvailableImages] = useState([]);
+    const [runtimeVms, setRuntimeVms] = useState([]);
   
   // Scenario State
   const [scenarioConfig, setScenarioConfig] = useState({
-      name: 'New Scenario',
-      team: 'blue', // blue, red, green
-      objective: 'Defend the network against incoming attacks.',
-      difficulty: 'easy'
+      ...SCENARIO_DEFAULTS
   });
   const [showScenarioSettings, setShowScenarioSettings] = useState(false);
   const [isDeploying, setIsDeploying] = useState(false);
@@ -240,6 +246,21 @@ const NetworkBuilder = () => {
       return `${(s / 3600).toFixed(1)}h`;
   };
 
+  const vmInfoForNode = (nodeId) => {
+      const suffix = `_${nodeId}`;
+      return runtimeVms.find(v => v?.name?.endsWith(suffix)) || null;
+  };
+
+  const primaryIp = (vmInfo) => {
+      if (!vmInfo || !vmInfo.interfaces) return null;
+      for (const iface of vmInfo.interfaces) {
+          if (iface?.ips && iface.ips.length > 0) {
+              return iface.ips[0];
+          }
+      }
+      return null;
+  };
+
   // Persistence Logic
   useEffect(() => {
       const saved = localStorage.getItem('networkTopology');
@@ -266,6 +287,21 @@ const NetworkBuilder = () => {
       axios.get(`${API_URL}/images`)
           .then(res => setAvailableImages(res.data))
           .catch(err => console.error("Failed to fetch images", err));
+  }, []);
+
+  useEffect(() => {
+      let timer;
+      const fetchRuntime = async () => {
+          try {
+              const res = await axios.get(`${API_URL}/runtime/vms`);
+              setRuntimeVms(res.data || []);
+          } catch (err) {
+              console.error('Failed to fetch runtime VMs', err);
+          }
+      };
+      fetchRuntime();
+      timer = setInterval(fetchRuntime, 5000);
+      return () => clearInterval(timer);
   }, []);
 
   const onConnect = useCallback(
@@ -302,7 +338,7 @@ const NetworkBuilder = () => {
               }
 
               if (parsed.scenario) {
-                  setScenarioConfig(parsed.scenario);
+                  setScenarioConfig({ ...SCENARIO_DEFAULTS, ...(parsed.scenario || {}) });
               }
               
               if (parsed.edges) {
@@ -328,7 +364,7 @@ const NetworkBuilder = () => {
       if (preset) {
           setNodes(preset.nodes);
           setEdges(preset.edges);
-          if (preset.scenario) setScenarioConfig(preset.scenario);
+          if (preset.scenario) setScenarioConfig({ ...SCENARIO_DEFAULTS, ...(preset.scenario || {}) });
       }
   };
 
@@ -672,6 +708,49 @@ const NetworkBuilder = () => {
             </div>
 
             <div className="flex-grow h-full relative" ref={reactFlowWrapper}>
+                <div className="absolute top-0 left-0 right-0 z-20 bg-gray-900/95 border-b border-gray-800 px-4 py-3 space-y-3">
+                    <div>
+                        <div className="text-sm text-gray-200 font-semibold">Live VM IPs</div>
+                        {nodes.length === 0 && <div className="text-xs text-gray-500">No nodes yet.</div>}
+                        {nodes.length > 0 && (
+                            <div className="grid md:grid-cols-2 gap-2 mt-2">
+                                {nodes.map(n => {
+                                    const info = vmInfoForNode(n.id);
+                                    const ip = primaryIp(info);
+                                    return (
+                                        <div key={n.id} className="bg-gray-800 border border-gray-700 rounded p-2 text-xs text-gray-200 flex justify-between">
+                                            <div className="truncate" title={n.data.label}>{n.data.label}</div>
+                                            <div className="text-gray-400 ml-2" title={info ? (ip || 'No IP yet') : 'VM not found'}>
+                                                {info ? (ip || 'IP pending') : 'not deployed'}
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </div>
+
+                    {edges.length > 0 && (
+                        <div>
+                            <div className="text-sm text-gray-200 font-semibold">Connections</div>
+                            <div className="grid md:grid-cols-2 gap-2 mt-2 text-xs text-gray-200">
+                                {edges.map(e => {
+                                    const src = nodes.find(n => n.id === e.source);
+                                    const dst = nodes.find(n => n.id === e.target);
+                                    const srcIp = primaryIp(vmInfoForNode(e.source));
+                                    const dstIp = primaryIp(vmInfoForNode(e.target));
+                                    return (
+                                        <div key={e.id} className="bg-gray-800 border border-gray-700 rounded px-2 py-1 flex justify-between items-center">
+                                            <div className="truncate" title={src?.data?.label || e.source}>{src?.data?.label || e.source} {srcIp ? `(${srcIp})` : ''}</div>
+                                            <div className="text-gray-500 mx-2">↔</div>
+                                            <div className="truncate text-right" title={dst?.data?.label || e.target}>{dst?.data?.label || e.target} {dstIp ? `(${dstIp})` : ''}</div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
+                </div>
                 <ReactFlow
                     nodes={nodes}
                     edges={edges}
@@ -705,6 +784,20 @@ const NetworkBuilder = () => {
                                     onChange={(e) => setScenarioConfig({...scenarioConfig, name: e.target.value})}
                                     className="w-full bg-gray-900 border border-gray-700 rounded p-2"
                                 />
+                            </div>
+
+                            <div>
+                                <label className="block text-sm text-gray-400 mb-1">Network Prefix (optional)</label>
+                                <input
+                                    type="text"
+                                    value={scenarioConfig.network_prefix || ''}
+                                    onChange={(e) => setScenarioConfig({ ...scenarioConfig, network_prefix: e.target.value })}
+                                    placeholder="Leave blank for a random per-deploy network name"
+                                    className="w-full bg-gray-900 border border-gray-700 rounded p-2"
+                                />
+                                <div className="text-xs text-gray-500 mt-1">
+                                    If set, libvirt networks will be named like <span className="font-mono">cyberange-&lt;prefix&gt;-c0</span>.
+                                </div>
                             </div>
                             
                             <div>

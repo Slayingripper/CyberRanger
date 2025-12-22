@@ -5,8 +5,9 @@ import uuid
 import os
 import subprocess
 import json
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 import ipaddress
+import xml.etree.ElementTree as ET
 
 # Determine working directory
 # If running in Docker, /app should exist.
@@ -100,6 +101,75 @@ class VMManager:
             pass
             
         return domains
+
+    def list_domains_with_interfaces(self) -> List[Dict[str, Any]]:
+        """Return VMs with network interface details (network name, MAC, IPs).
+
+        Uses libvirt interfaceAddresses with DHCP lease source; falls back to XML parsing for network name.
+        """
+        if not self.conn:
+            self.connect()
+
+        results: List[Dict[str, Any]] = []
+
+        try:
+            domain_names = []
+            for domain_id in self.conn.listDomainsID():
+                dom = self.conn.lookupByID(domain_id)
+                domain_names.append(dom.name())
+            for name in self.conn.listDefinedDomains():
+                domain_names.append(name)
+
+            for name in domain_names:
+                try:
+                    dom = self.conn.lookupByName(name)
+                except libvirt.libvirtError:
+                    continue
+
+                iface_info = []
+                try:
+                    addrs = dom.interfaceAddresses(libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_LEASE, 0)
+                except libvirt.libvirtError:
+                    addrs = {}
+
+                # Build MAC->network map from XML
+                try:
+                    xml_desc = dom.XMLDesc(0)
+                    root = ET.fromstring(xml_desc)
+                    mac_to_net: Dict[str, str] = {}
+                    for iface in root.findall("./devices/interface"):
+                        mac_el = iface.find("mac")
+                        src_el = iface.find("source")
+                        if mac_el is not None and src_el is not None:
+                            mac = mac_el.get("address")
+                            net = src_el.get("network") or src_el.get("bridge")
+                            if mac and net:
+                                mac_to_net[mac.lower()] = net
+                except Exception:
+                    mac_to_net = {}
+
+                for ifname, data in (addrs or {}).items():
+                    mac = data.get("hwaddr")
+                    addrs_list = []
+                    for a in data.get("addrs", []) or []:
+                        ip = a.get("addr")
+                        if ip:
+                            addrs_list.append(ip)
+                    iface_info.append(
+                        {
+                            "name": ifname,
+                            "mac": mac,
+                            "network": mac_to_net.get(mac.lower()) if mac else None,
+                            "ips": addrs_list,
+                        }
+                    )
+
+                results.append({"name": name, "interfaces": iface_info})
+
+        except libvirt.libvirtError:
+            pass
+
+        return results
 
     def _get_domain_info(self, dom):
         state, maxmem, mem, cpus, cput = dom.info()
@@ -383,6 +453,60 @@ runcmd:
         if not self.conn:
             self.connect()
 
+        def _bridge_candidates(base: str, max_attempts: int = 6) -> List[str]:
+            """Generate candidate bridge names (<=15 chars) to avoid collisions."""
+            base = (base or "br0")[:15]
+            cands = [base]
+            for i in range(1, max_attempts + 1):
+                suffix = str(i)
+                trimmed = base[: 15 - len(suffix)] + suffix
+                if trimmed not in cands:
+                    cands.append(trimmed)
+            return cands
+
+        def _define_network(target_bridge: str) -> bool:
+            # gateway_ip example: "192.168.100.1"
+            try:
+                ip = ipaddress.IPv4Address(gateway_ip)
+                prefix = str(ip).rsplit('.', 1)[0]
+            except Exception:
+                prefix = "192.168.100"
+                gateway_ip_local = "192.168.100.1"
+            else:
+                gateway_ip_local = gateway_ip
+
+            dhcp_xml = f"<dhcp><range start=\"{prefix}.50\" end=\"{prefix}.254\"/></dhcp>" if dhcp else ""
+            forward_xml = "<forward mode='nat'/>" if nat else ""
+
+            xml = f"""
+            <network>
+              <name>{name}</name>
+              {forward_xml}
+              <bridge name='{target_bridge}' stp='on' delay='0'/>
+              <ip address='{gateway_ip_local}' netmask='255.255.255.0'>
+                {dhcp_xml}
+              </ip>
+            </network>
+            """
+            net = self.conn.networkDefineXML(xml)
+            if net:
+                net.create()
+                net.setAutostart(True)
+                return True
+            return False
+
+        def _reuse_existing() -> bool:
+            try:
+                net = self.conn.networkLookupByName(name)
+                if net is not None:
+                    if net.isActive() != 1:
+                        net.create()
+                    net.setAutostart(True)
+                    return True
+            except libvirt.libvirtError:
+                pass
+            return False
+
         try:
             net = self.conn.networkLookupByName(name)
             if net is not None:
@@ -393,36 +517,29 @@ runcmd:
         except libvirt.libvirtError:
             pass
 
-        # gateway_ip example: "192.168.100.1"
-        try:
-            ip = ipaddress.IPv4Address(gateway_ip)
-            prefix = str(ip).rsplit('.', 1)[0]
-        except Exception:
-            prefix = "192.168.100"
-            gateway_ip = "192.168.100.1"
+        # If anything goes wrong but the network already exists, just reuse it.
+        if _reuse_existing():
+            return True
 
-        dhcp_xml = f"<dhcp><range start=\"{prefix}.50\" end=\"{prefix}.254\"/></dhcp>" if dhcp else ""
-        forward_xml = "<forward mode='nat'/>" if nat else ""
-
-        xml = f"""
-        <network>
-          <name>{name}</name>
-          {forward_xml}
-          <bridge name='{bridge_name}' stp='on' delay='0'/>
-          <ip address='{gateway_ip}' netmask='255.255.255.0'>
-            {dhcp_xml}
-          </ip>
-        </network>
-        """
-        try:
-            net = self.conn.networkDefineXML(xml)
-            if net:
-                net.create()
-                net.setAutostart(True)
-                return True
-        except libvirt.libvirtError:
-            return False
-
+        # Try the requested bridge first; if it is already in use, retry with a suffix.
+        last_error = None
+        for cand in _bridge_candidates(bridge_name):
+            try:
+                if _define_network(cand):
+                    return True
+            except libvirt.libvirtError as e:
+                last_error = str(e)
+                # Retry on bridge collisions; otherwise bail out.
+                if "already exists" in last_error or "already in use by interface" in last_error:
+                    if _reuse_existing():
+                        return True
+                    # If it doesn't exist yet, keep trying different bridges.
+                    if "already in use by interface" in last_error:
+                        continue
+                return False
+        # If we exhausted candidates, surface failure.
+        if last_error:
+            print(f"Failed to create network {name}: {last_error}")
         return False
 
     def ensure_isolated_network(self, name: str, bridge_name: str) -> bool:
@@ -433,6 +550,42 @@ runcmd:
         if not self.conn:
             self.connect()
 
+        def _bridge_candidates(base: str, max_attempts: int = 6) -> List[str]:
+            base = (base or "br0")[:15]
+            cands = [base]
+            for i in range(1, max_attempts + 1):
+                suffix = str(i)
+                trimmed = base[: 15 - len(suffix)] + suffix
+                if trimmed not in cands:
+                    cands.append(trimmed)
+            return cands
+
+        def _define_network(target_bridge: str) -> bool:
+            xml = f"""
+            <network>
+              <name>{name}</name>
+              <bridge name='{target_bridge}' stp='on' delay='0'/>
+            </network>
+            """
+            net = self.conn.networkDefineXML(xml)
+            if net:
+                net.create()
+                net.setAutostart(True)
+                return True
+            return False
+
+        def _reuse_existing() -> bool:
+            try:
+                net = self.conn.networkLookupByName(name)
+                if net is not None:
+                    if net.isActive() != 1:
+                        net.create()
+                    net.setAutostart(True)
+                    return True
+            except libvirt.libvirtError:
+                pass
+            return False
+
         try:
             net = self.conn.networkLookupByName(name)
             if net is not None:
@@ -443,21 +596,24 @@ runcmd:
         except libvirt.libvirtError:
             pass
 
-        xml = f"""
-        <network>
-          <name>{name}</name>
-          <bridge name='{bridge_name}' stp='on' delay='0'/>
-        </network>
-        """
-        try:
-            net = self.conn.networkDefineXML(xml)
-            if net:
-                net.create()
-                net.setAutostart(True)
-                return True
-        except libvirt.libvirtError:
-            return False
+        if _reuse_existing():
+            return True
 
+        last_error = None
+        for cand in _bridge_candidates(bridge_name):
+            try:
+                if _define_network(cand):
+                    return True
+            except libvirt.libvirtError as e:
+                last_error = str(e)
+                if "already exists" in last_error or "already in use by interface" in last_error:
+                    if _reuse_existing():
+                        return True
+                    if "already in use by interface" in last_error:
+                        continue
+                return False
+        if last_error:
+            print(f"Failed to create isolated network {name}: {last_error}")
         return False
 
     def start_vm(self, name: str):
