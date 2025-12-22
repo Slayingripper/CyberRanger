@@ -1,0 +1,859 @@
+import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import ReactFlow, {
+  ReactFlowProvider,
+  addEdge,
+  useNodesState,
+  useEdgesState,
+  Controls,
+  Background,
+} from 'reactflow';
+import 'reactflow/dist/style.css';
+import { Play, Plus, Trash2, Upload, FileText, Target, Shield, Flag } from 'lucide-react';
+import yaml from 'js-yaml';
+import axios from 'axios';
+import CustomNode from './CustomNode';
+
+const initialNodes = [
+  {
+    id: '1',
+    type: 'custom',
+    data: { label: 'Internet Gateway', image: 'gateway', cpu: 1, ram: 512, assets: [] },
+    position: { x: 250, y: 5 },
+  },
+];
+
+const PREDEFINED_TOPOLOGIES = {
+    "simple-client-server": {
+        scenario: {
+            name: 'Simple Client-Server',
+            team: 'blue',
+            objective: 'Deploy a simple web server and client.',
+            difficulty: 'easy'
+        },
+        nodes: [
+            { id: '1', type: 'custom', position: { x: 100, y: 100 }, data: { label: 'Web Server', image: 'ubuntu-20.04', cpu: 2, ram: 2048, assets: [{ type: 'package', value: 'nginx' }] } },
+            { id: '2', type: 'custom', position: { x: 400, y: 100 }, data: { label: 'Client', image: 'ubuntu-20.04', cpu: 1, ram: 1024, assets: [{ type: 'package', value: 'curl' }] } }
+        ],
+        edges: [
+            { id: 'e1-2', source: '1', target: '2' }
+        ]
+    },
+    "iso-install-lab": {
+        scenario: {
+            name: 'ISO Install Lab',
+            team: 'blue',
+            objective: 'Boot Linux installers from ISO and install manually.',
+            difficulty: 'easy'
+        },
+        nodes: [
+            { id: '1', type: 'custom', position: { x: 120, y: 120 }, data: { label: 'Installer VM 1 (Xubuntu ISO)', image: 'xubuntu-24.04.3-minimal-amd64.iso', cpu: 2, ram: 2048, assets: [] } },
+            { id: '2', type: 'custom', position: { x: 460, y: 120 }, data: { label: 'Installer VM 2 (Xubuntu ISO)', image: 'xubuntu-24.04.3-minimal-amd64.iso', cpu: 2, ram: 2048, assets: [] } }
+        ],
+        edges: [
+            { id: 'e1-2', source: '1', target: '2' }
+        ]
+    },
+    "sl1-2-smart-home-pv": {
+        scenario: {
+            name: 'Smart Home PV (SL1-2)',
+            team: 'red',
+            objective: 'Deploy the Smart Home PV challenge services on a single game-server VM.',
+            difficulty: 'hard',
+            sources: {
+                // Auto-download Ubuntu base image if missing
+                'ubuntu-20.04': 'https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-amd64.img'
+            }
+        },
+        nodes: [
+            {
+                id: '1',
+                type: 'custom',
+                position: { x: 240, y: 140 },
+                data: {
+                    label: 'game-server (Ubuntu)',
+                    image: 'ubuntu-20.04',
+                    cpu: 4,
+                    ram: 8192,
+                    assets: [
+                        { type: 'package', value: 'git' },
+                        { type: 'package', value: 'docker.io' },
+                        { type: 'package', value: 'docker-compose' },
+                        { type: 'command', value: 'systemctl enable --now docker' },
+                        { type: 'command', value: 'cd /opt && (test -d sl1-2 || git clone --depth 1 https://github.com/Slayingripper/SL1-2.git sl1-2)' },
+                        { type: 'command', value: 'docker network inspect playground-net >/dev/null 2>&1 || docker network create --subnet 172.20.0.0/24 playground-net' },
+                        { type: 'command', value: 'cd /opt/sl1-2/provisioning/files/smart-home-pv && (docker compose up -d --build || docker-compose up -d --build)' }
+                    ]
+                }
+            }
+        ],
+        edges: []
+    },
+    "sl1-2-smart-home-pv-3vm": {
+        scenario: {
+            name: 'Smart Home PV (SL1-2) - 3 VMs',
+            team: 'red',
+            objective: 'Kali attacker VM + game-server VM + OPNsense blue-team gateway.',
+            difficulty: 'hard',
+            sources: {
+                // Auto-download Ubuntu base image if missing
+                'ubuntu-20.04': 'https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-amd64.img',
+
+                // Kali QEMU image is distributed as a .7z; backend will download + extract to qcow2.
+                'kali-linux': {
+                    url: 'https://cdimage.kali.org/current/kali-linux-2025.4-qemu-amd64.7z',
+                    filename: 'kali-linux-2025.4-qemu-amd64.7z',
+                    extract: {
+                        type: '7z',
+                        output_filename: 'kali-linux-2025.4-qemu-amd64.qcow2',
+                        member_glob: '*.qcow2'
+                    }
+                },
+
+                // OPNsense (downloaded once, cached as opnsense.img)
+                'opnsense': {
+                    url: 'https://pkg.opnsense.org/releases/25.7/OPNsense-25.7-vga-amd64.img.bz2',
+                    filename: 'OPNsense-25.7-vga-amd64.img.bz2',
+                    extract: {
+                        type: 'bz2',
+                        output_filename: 'opnsense.img'
+                    },
+                    min_bytes: 200000000
+                }
+            }
+        },
+        nodes: [
+            {
+                id: 'attacker',
+                type: 'custom',
+                position: { x: 80, y: 140 },
+                data: {
+                    label: 'Attacker (Kali VM)',
+                    image: 'kali-linux',
+                    cpu: 2,
+                    ram: 4096,
+                    assets: []
+                }
+            },
+            {
+                id: 'game',
+                type: 'custom',
+                position: { x: 360, y: 140 },
+                data: {
+                    label: 'game-server (Ubuntu)',
+                    image: 'ubuntu-20.04',
+                    cpu: 4,
+                    ram: 8192,
+                    assets: [
+                        { type: 'package', value: 'git' },
+                        { type: 'package', value: 'docker.io' },
+                        { type: 'package', value: 'docker-compose' },
+                        { type: 'command', value: 'systemctl enable --now docker' },
+                        { type: 'command', value: 'mkdir -p /opt && chown user:user /opt' },
+                        { type: 'command', value: 'cd /opt && (test -d sl1-2 || git clone --depth 1 https://github.com/Slayingripper/SL1-2.git sl1-2)' },
+                        { type: 'command', value: 'docker network inspect playground-net >/dev/null 2>&1 || docker network create --subnet 172.20.0.0/24 playground-net' },
+                        { type: 'command', value: 'cd /opt/sl1-2/provisioning/files/smart-home-pv && (docker compose up -d --build || docker-compose up -d --build)' }
+                    ]
+                }
+            },
+            {
+                id: 'gateway',
+                type: 'custom',
+                position: { x: 640, y: 140 },
+                data: {
+                    label: 'Blue Team Gateway (OPNsense)',
+                    image: 'opnsense',
+                    cpu: 2,
+                    ram: 4096,
+                    assets: []
+                }
+            }
+        ],
+        edges: [
+            { id: 'e-gateway-attacker', source: 'gateway', target: 'attacker' },
+            { id: 'e-gateway-game', source: 'gateway', target: 'game' }
+        ]
+    },
+    "attacker-victim": {
+        scenario: {
+            name: 'Attacker vs Victim (Linux)',
+            team: 'red',
+            objective: 'Deploy a basic attacker and victim pair (Linux).',
+            difficulty: 'easy'
+        },
+        nodes: [
+            { id: '1', type: 'custom', position: { x: 100, y: 100 }, data: { label: 'Attacker (Kali)', image: 'kali-linux', cpu: 2, ram: 4096, assets: [{ type: 'package', value: 'nmap' }] } },
+            { id: '2', type: 'custom', position: { x: 400, y: 100 }, data: { label: 'Victim (Ubuntu)', image: 'ubuntu-20.04', cpu: 2, ram: 2048, assets: [{ type: 'package', value: 'openssh-server' }] } }
+        ],
+        edges: [
+            { id: 'e1-2', source: '1', target: '2' }
+        ]
+    }
+};
+const getId = () => `dndnode_${id++}`;
+
+const API_URL = 'http://localhost:8001/api';
+
+const NetworkBuilder = () => {
+  const reactFlowWrapper = useRef(null);
+  const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
+  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+  const [reactFlowInstance, setReactFlowInstance] = useState(null);
+  const [selectedNode, setSelectedNode] = useState(null);
+  const [availableImages, setAvailableImages] = useState([]);
+  
+  // Scenario State
+  const [scenarioConfig, setScenarioConfig] = useState({
+      name: 'New Scenario',
+      team: 'blue', // blue, red, green
+      objective: 'Defend the network against incoming attacks.',
+      difficulty: 'easy'
+  });
+  const [showScenarioSettings, setShowScenarioSettings] = useState(false);
+  const [isDeploying, setIsDeploying] = useState(false);
+    const [deployJobId, setDeployJobId] = useState(null);
+    const [deployJob, setDeployJob] = useState(null);
+    const [deployJobError, setDeployJobError] = useState(null);
+
+  const nodeTypes = useMemo(() => ({ custom: CustomNode }), []);
+
+  const formatBytes = (bytes) => {
+      const b = Number(bytes || 0);
+      if (!Number.isFinite(b) || b <= 0) return '0 B';
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      const idx = Math.min(units.length - 1, Math.floor(Math.log(b) / Math.log(1024)));
+      const val = b / Math.pow(1024, idx);
+      const digits = idx === 0 ? 0 : (val < 10 ? 2 : 1);
+      return `${val.toFixed(digits)} ${units[idx]}`;
+  };
+
+  const formatSpeed = (bps) => {
+      const v = Number(bps || 0);
+      if (!Number.isFinite(v) || v <= 0) return null;
+      return `${formatBytes(v)}/s`;
+  };
+
+  const formatEta = (seconds) => {
+      const s = Number(seconds);
+      if (!Number.isFinite(s) || s <= 0) return null;
+      if (s < 60) return `${Math.round(s)}s`;
+      if (s < 3600) return `${Math.round(s / 60)}m`;
+      return `${(s / 3600).toFixed(1)}h`;
+  };
+
+  // Persistence Logic
+  useEffect(() => {
+      const saved = localStorage.getItem('networkTopology');
+      if (saved) {
+          try {
+              const { nodes: savedNodes, edges: savedEdges, scenario: savedScenario } = JSON.parse(saved);
+              if (Array.isArray(savedNodes)) setNodes(savedNodes);
+              if (Array.isArray(savedEdges)) setEdges(savedEdges);
+              if (savedScenario) setScenarioConfig(savedScenario);
+          } catch (err) {
+              console.error('Failed to load saved topology', err);
+          }
+      }
+  }, []);
+
+  useEffect(() => {
+      if (nodes.length > 0 || edges.length > 0) {
+          const topology = { nodes, edges, scenario: scenarioConfig };
+          localStorage.setItem('networkTopology', JSON.stringify(topology));
+      }
+  }, [nodes, edges, scenarioConfig]);
+
+  useEffect(() => {
+      axios.get(`${API_URL}/images`)
+          .then(res => setAvailableImages(res.data))
+          .catch(err => console.error("Failed to fetch images", err));
+  }, []);
+
+  const onConnect = useCallback(
+    (params) => setEdges((eds) => addEdge(params, eds)),
+    [],
+  );
+
+  const handleFileUpload = (event) => {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = (e) => {
+          try {
+              const content = e.target.result;
+              const parsed = yaml.load(content);
+              
+              if (parsed.nodes) {
+                  // Map YAML nodes to ReactFlow nodes
+                  const newNodes = parsed.nodes.map(n => ({
+                      id: n.id,
+                      type: 'custom',
+                      position: n.position || { x: 100, y: 100 },
+                      data: {
+                          label: n.label || 'VM',
+                          image: n.config?.image || 'ubuntu-20.04',
+                          cpu: n.config?.cpu || 1,
+                          ram: n.config?.ram || 1024,
+                          assets: n.config?.assets || [],
+                          automation: n.config?.automation || null
+                      }
+                  }));
+                  setNodes(newNodes);
+              }
+
+              if (parsed.scenario) {
+                  setScenarioConfig(parsed.scenario);
+              }
+              
+              if (parsed.edges) {
+                  const newEdges = parsed.edges.map((e, idx) => ({
+                      id: e.id || `e${idx}`,
+                      source: e.source,
+                      target: e.target
+                  }));
+                  setEdges(newEdges);
+              }
+              
+              alert("Topology loaded successfully!");
+          } catch (err) {
+              console.error(err);
+              alert("Failed to parse YAML file: " + err.message);
+          }
+      };
+      reader.readAsText(file);
+  };
+
+  const loadPreset = (presetName) => {
+      const preset = PREDEFINED_TOPOLOGIES[presetName];
+      if (preset) {
+          setNodes(preset.nodes);
+          setEdges(preset.edges);
+          if (preset.scenario) setScenarioConfig(preset.scenario);
+      }
+  };
+
+  const onDragOver = useCallback((event) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+  }, []);
+
+  const onDrop = useCallback(
+    (event) => {
+      event.preventDefault();
+
+      const type = event.dataTransfer.getData('application/reactflow');
+
+      // check if the dropped element is valid
+      if (typeof type === 'undefined' || !type) {
+        return;
+      }
+
+      const position = reactFlowInstance.screenToFlowPosition({
+        x: event.clientX,
+        y: event.clientY,
+      });
+      
+      const image = event.dataTransfer.getData('image');
+      const isRouter = type === 'router';
+
+      const newNode = {
+        id: getId(),
+        type: 'custom', 
+        position,
+        data: { 
+            label: isRouter ? 'Router' : (image || 'New VM'), 
+            image: isRouter ? 'gateway' : (image || 'ubuntu-20.04'), 
+            cpu: isRouter ? 1 : 2, 
+            ram: isRouter ? 512 : 2048, 
+            assets: [] 
+        },
+      };
+
+      setNodes((nds) => nds.concat(newNode));
+    },
+    [reactFlowInstance],
+  );
+
+  const onNodeClick = (event, node) => {
+    setSelectedNode(node);
+  };
+
+  const updateNodeData = (key, value) => {
+    if (!selectedNode) return;
+    
+    setNodes((nds) =>
+      nds.map((node) => {
+        if (node.id === selectedNode.id) {
+          const newData = { ...node.data, [key]: value };
+          // Update selected node as well to reflect changes in UI immediately
+          const updatedNode = { ...node, data: newData };
+          setSelectedNode(updatedNode);
+          return updatedNode;
+        }
+        return node;
+      })
+    );
+  };
+
+  const addAsset = () => {
+      if (!selectedNode) return;
+      const currentAssets = selectedNode.data.assets || [];
+      updateNodeData('assets', [...currentAssets, { type: 'package', value: '' }]);
+  };
+
+  const updateAsset = (index, field, value) => {
+      if (!selectedNode) return;
+      const currentAssets = [...(selectedNode.data.assets || [])];
+      currentAssets[index] = { ...currentAssets[index], [field]: value };
+      updateNodeData('assets', currentAssets);
+  };
+  
+  const removeAsset = (index) => {
+      if (!selectedNode) return;
+      const currentAssets = [...(selectedNode.data.assets || [])];
+      currentAssets.splice(index, 1);
+      updateNodeData('assets', currentAssets);
+  };
+
+  const handleDeploy = async () => {
+      console.log("Deploy button clicked");
+      
+      if (nodes.length === 0) {
+          alert("Cannot deploy an empty topology. Please add some nodes.");
+          return;
+      }
+
+      // Construct topology payload
+      const topology = {
+          scenario: scenarioConfig,
+          nodes: nodes.map(n => ({
+              id: n.id,
+              label: n.data.label,
+              config: {
+                  image: n.data.image,
+                  cpu: n.data.cpu,
+                  ram: n.data.ram,
+                  assets: n.data.assets,
+                  automation: n.data.automation || null
+              }
+          })),
+          edges: edges.map(e => ({
+              source: e.source,
+              target: e.target
+          }))
+      };
+      
+      console.log("Deploying topology:", topology);
+      
+      // Call API
+      setIsDeploying(true);
+      setDeployJobError(null);
+      setDeployJob(null);
+      setDeployJobId(null);
+      try {
+          console.log(`Starting deploy job at ${API_URL}/topology/deploy-jobs`);
+          const start = await axios.post(`${API_URL}/topology/deploy-jobs`, topology);
+          const jobId = start.data?.job_id;
+          if (!jobId) {
+              throw new Error('Backend did not return a job_id');
+          }
+          setDeployJobId(jobId);
+          while (true) {
+              const jobRes = await axios.get(`${API_URL}/topology/deploy-jobs/${jobId}`);
+              setDeployJob(jobRes.data);
+
+              const status = jobRes.data?.status;
+              if (status === 'completed' || status === 'failed') {
+                  const result = jobRes.data?.result;
+                  const results = result?.results || [];
+                  const errors = results.filter(r => r.status === 'error');
+                  const successes = results.filter(r => r.status === 'success');
+
+                  let message = `Deployment finished for scenario: ${scenarioConfig.name}!\n`;
+                  message += `Successful VMs: ${successes.length}\n`;
+                  message += `Failed VMs: ${errors.length}\n`;
+                  if (errors.length > 0) {
+                      message += "\nErrors:\n";
+                      errors.forEach(e => {
+                          message += `- ${e.node || e.name || 'Unknown Node'}: ${e.message || e.detail || 'error'}\n`;
+                      });
+                  }
+                  alert(message);
+                  break;
+              }
+
+              // wait before next poll
+              await new Promise(r => setTimeout(r, 750));
+          }
+      } catch (e) {
+          console.error("Deployment error:", e);
+          const errorMsg = e.response?.data?.detail || e.message || 'Unknown error';
+          setDeployJobError(errorMsg);
+          alert('Deployment failed: ' + errorMsg + "\n\nCheck console for details.");
+      } finally {
+          setIsDeploying(false);
+      }
+  };
+
+  return (
+    <div className="dndflow w-full flex flex-col bg-gray-900 text-white" style={{ height: 'calc(100vh - 100px)' }}>
+      <div className="flex justify-between items-center p-4 bg-gray-800 border-b border-gray-700">
+        <div className="flex items-center gap-4">
+            <h2 className="text-xl font-bold text-white">Network Topology Builder</h2>
+            
+            <div className="relative group">
+                <button className="flex items-center gap-2 bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-sm transition-colors">
+                    <FileText size={14} /> Load Preset
+                </button>
+                <div className="absolute top-full left-0 pt-2 w-48 hidden group-hover:block z-50">
+                    <div className="bg-gray-800 border border-gray-700 rounded shadow-xl overflow-hidden">
+                        <button onClick={() => loadPreset('simple-client-server')} className="block w-full text-left px-4 py-2 hover:bg-gray-700 text-sm">Simple Client-Server</button>
+                        <button onClick={() => loadPreset('iso-install-lab')} className="block w-full text-left px-4 py-2 hover:bg-gray-700 text-sm">ISO Install Lab (Linux)</button>
+                        <button onClick={() => loadPreset('sl1-2-smart-home-pv')} className="block w-full text-left px-4 py-2 hover:bg-gray-700 text-sm">Smart Home PV (SL1-2)</button>
+                        <button onClick={() => loadPreset('sl1-2-smart-home-pv-3vm')} className="block w-full text-left px-4 py-2 hover:bg-gray-700 text-sm">Smart Home PV (SL1-2) - 3 VMs</button>
+                        <button onClick={() => loadPreset('attacker-victim')} className="block w-full text-left px-4 py-2 hover:bg-gray-700 text-sm">Attacker vs Victim (Linux)</button>
+                    </div>
+                </div>
+            </div>
+
+            <label className="flex items-center gap-2 bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-sm cursor-pointer transition-colors">
+                <Upload size={14} /> Upload YAML
+                <input type="file" accept=".yaml,.yml" onChange={handleFileUpload} className="hidden" />
+            </label>
+
+            <button onClick={() => setShowScenarioSettings(true)} className="flex items-center gap-2 bg-blue-900/50 hover:bg-blue-900 border border-blue-800 px-3 py-1.5 rounded text-sm transition-colors text-blue-200">
+                <Target size={14} /> Scenario Settings
+            </button>
+        </div>
+
+        <button 
+            onClick={handleDeploy} 
+            disabled={isDeploying}
+            className={`flex items-center gap-2 px-4 py-2 rounded transition-colors ${isDeploying ? 'bg-green-800 cursor-not-allowed text-gray-300' : 'bg-green-600 hover:bg-green-700 text-white'}`}
+        >
+            {isDeploying ? (
+                <>
+                    <div className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full"></div>
+                    Deploying...
+                </>
+            ) : (
+                <>
+                    <Play size={16} /> Deploy Network
+                </>
+            )}
+        </button>
+      </div>
+
+            {(isDeploying || deployJob) && (
+                <div className="bg-gray-900 border-b border-gray-700 px-4 py-3">
+                    <div className="flex items-center justify-between gap-4">
+                        <div className="text-sm">
+                            <div className="text-gray-200 font-medium">Deploy Progress</div>
+                            <div className="text-gray-400">
+                                {deployJob?.message || (isDeploying ? 'Starting…' : '')}
+                                {deployJobId ? ` (job ${deployJobId.slice(0, 8)}…)` : ''}
+                            </div>
+                            {deployJobError && <div className="text-red-300 mt-1">Error: {deployJobError}</div>}
+                        </div>
+                        <div className="text-xs text-gray-400">
+                            Status: {deployJob?.status || (isDeploying ? 'running' : 'idle')}
+                        </div>
+                    </div>
+
+                    {deployJob?.progress?.downloads && Object.keys(deployJob.progress.downloads).length > 0 && (
+                        <div className="mt-3">
+                            <div className="text-xs text-gray-400 mb-2">Downloads</div>
+                            <div className="space-y-2">
+                                {Object.entries(deployJob.progress.downloads).map(([name, d]) => {
+                                    const percent = typeof d?.percent === 'number' ? d.percent : 0;
+                                    const status = d?.status || 'pending';
+                                    const total = d?.total || 0;
+                                    const current = d?.current || 0;
+                                    const speed = formatSpeed(d?.speed_bps);
+                                    const eta = formatEta(d?.eta_seconds);
+                                    const sizeLabel = total > 0 ? `${formatBytes(current)} / ${formatBytes(total)}` : (current > 0 ? `${formatBytes(current)}` : '');
+                                    const rightBits = [
+                                        total > 0 ? `${percent}%` : null,
+                                        sizeLabel || null,
+                                        speed || null,
+                                        eta ? `ETA ${eta}` : null,
+                                        status ? status : null,
+                                    ].filter(Boolean);
+                                    const label = rightBits.join(' · ');
+
+                                    return (
+                                        <div key={name} className="bg-gray-800 border border-gray-700 rounded p-2">
+                                            <div className="flex items-center justify-between text-xs">
+                                                <div className="text-gray-200 truncate" title={name}>{name}</div>
+                                                <div className="text-gray-400 ml-2">{label}</div>
+                                            </div>
+                                            <div className="mt-2 h-2 w-full bg-gray-700 rounded overflow-hidden">
+                                                <div
+                                                    className="h-2 bg-blue-600"
+                                                    style={{ width: `${Math.max(0, Math.min(100, percent))}%` }}
+                                                />
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
+
+                    {deployJob?.progress?.nodes && Object.keys(deployJob.progress.nodes).length > 0 && (
+                        <div className="mt-3">
+                            <div className="text-xs text-gray-400 mb-2">VMs</div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                {Object.entries(deployJob.progress.nodes).map(([id, n]) => {
+                                    const status = n?.status || 'pending';
+                                    const msg = n?.message;
+
+                                    const pctMap = {
+                                        pending: 0,
+                                        creating: 50,
+                                        running: 100,
+                                        error: 100,
+                                    };
+                                    const percent = pctMap[status] ?? 0;
+
+                                    return (
+                                        <div key={id} className="bg-gray-800 border border-gray-700 rounded p-2">
+                                            <div className="flex items-center justify-between text-xs">
+                                                <div className="text-gray-200 truncate" title={n?.label || id}>{n?.label || id}</div>
+                                                <div className={`ml-2 ${status === 'error' ? 'text-red-300' : 'text-gray-400'}`}>{status}</div>
+                                            </div>
+                                            {msg && <div className="text-xs text-red-300 mt-1 truncate" title={msg}>{msg}</div>}
+                                            <div className="mt-2 h-2 w-full bg-gray-700 rounded overflow-hidden">
+                                                <div
+                                                    className={status === 'error' ? 'h-2 bg-red-600' : 'h-2 bg-green-600'}
+                                                    style={{ width: `${Math.max(0, Math.min(100, percent))}%` }}
+                                                />
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            )}
+      
+      <div className="flex-grow flex h-full overflow-hidden">
+        <ReactFlowProvider>
+            <div className="w-64 bg-gray-900 border-r border-gray-700 p-4 flex flex-col gap-4 z-10 overflow-y-auto">
+                <div className="text-gray-400 text-sm font-medium mb-2">Network Nodes</div>
+                
+                <div className="dndnode output p-3 bg-purple-900/30 border border-purple-700 rounded cursor-grab text-purple-100 hover:bg-purple-900/50 transition-colors flex items-center gap-2" onDragStart={(event) => event.dataTransfer.setData('application/reactflow', 'router')} draggable>
+                    <Flag size={16} /> Router / Gateway
+                </div>
+
+                <div className="text-gray-400 text-sm font-medium mt-4 mb-2">Available Images</div>
+                {availableImages.length === 0 && (
+                    <div className="text-xs text-gray-500 italic">No images found.</div>
+                )}
+                {availableImages.map((img) => (
+                    <div 
+                        key={img.path}
+                        className="dndnode input p-3 bg-blue-900/30 border border-blue-700 rounded cursor-grab text-blue-100 hover:bg-blue-900/50 transition-colors flex items-center gap-2 mb-2" 
+                        onDragStart={(event) => {
+                            event.dataTransfer.setData('application/reactflow', 'vm');
+                            event.dataTransfer.setData('image', img.name);
+                        }} 
+                        draggable
+                    >
+                        <Shield size={16} /> {img.name}
+                    </div>
+                ))}
+                
+                <div className="text-gray-400 text-sm font-medium mt-4 mb-2">Generic Nodes</div>
+                <div className="dndnode input p-3 bg-gray-800 border border-gray-600 rounded cursor-grab text-gray-300 hover:bg-gray-700 transition-colors flex items-center gap-2" onDragStart={(event) => event.dataTransfer.setData('application/reactflow', 'vm')} draggable>
+                    <Shield size={16} /> Generic VM
+                </div>
+            </div>
+
+            <div className="flex-grow h-full relative" ref={reactFlowWrapper}>
+                <ReactFlow
+                    nodes={nodes}
+                    edges={edges}
+                    onNodesChange={onNodesChange}
+                    onEdgesChange={onEdgesChange}
+                    onConnect={onConnect}
+                    onInit={setReactFlowInstance}
+                    onDrop={onDrop}
+                    onDragOver={onDragOver}
+                    onNodeClick={onNodeClick}
+                    nodeTypes={nodeTypes}
+                    fitView
+                    className="bg-gray-950"
+                >
+                    <Controls />
+                    <Background color="#333" gap={16} />
+                </ReactFlow>
+            </div>
+
+            {showScenarioSettings && (
+                <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+                    <div className="bg-gray-800 p-6 rounded-xl border border-gray-700 w-full max-w-md">
+                        <h3 className="text-xl font-bold mb-4">Scenario Configuration</h3>
+                        
+                        <div className="space-y-4">
+                            <div>
+                                <label className="block text-sm text-gray-400 mb-1">Scenario Name</label>
+                                <input 
+                                    type="text" 
+                                    value={scenarioConfig.name}
+                                    onChange={(e) => setScenarioConfig({...scenarioConfig, name: e.target.value})}
+                                    className="w-full bg-gray-900 border border-gray-700 rounded p-2"
+                                />
+                            </div>
+                            
+                            <div>
+                                <label className="block text-sm text-gray-400 mb-1">Team / Type</label>
+                                <select 
+                                    value={scenarioConfig.team}
+                                    onChange={(e) => setScenarioConfig({...scenarioConfig, team: e.target.value})}
+                                    className="w-full bg-gray-900 border border-gray-700 rounded p-2"
+                                >
+                                    <option value="blue">Blue Team (Defense)</option>
+                                    <option value="red">Red Team (Offense)</option>
+                                    <option value="green">Green Team (Forensics/Infra)</option>
+                                </select>
+                            </div>
+
+                            <div>
+                                <label className="block text-sm text-gray-400 mb-1">Difficulty</label>
+                                <select 
+                                    value={scenarioConfig.difficulty}
+                                    onChange={(e) => setScenarioConfig({...scenarioConfig, difficulty: e.target.value})}
+                                    className="w-full bg-gray-900 border border-gray-700 rounded p-2"
+                                >
+                                    <option value="easy">Easy</option>
+                                    <option value="medium">Medium</option>
+                                    <option value="hard">Hard</option>
+                                    <option value="expert">Expert</option>
+                                </select>
+                            </div>
+
+                            <div>
+                                <label className="block text-sm text-gray-400 mb-1">Objective / Description</label>
+                                <textarea 
+                                    value={scenarioConfig.objective}
+                                    onChange={(e) => setScenarioConfig({...scenarioConfig, objective: e.target.value})}
+                                    className="w-full bg-gray-900 border border-gray-700 rounded p-2 h-32"
+                                />
+                            </div>
+                        </div>
+
+                        <div className="flex justify-end mt-6">
+                            <button onClick={() => setShowScenarioSettings(false)} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded">
+                                Save Configuration
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {selectedNode && (
+                <div className="w-80 bg-gray-900 border-l border-gray-700 p-4 overflow-y-auto z-10 shadow-xl">
+                    <div className="flex justify-between items-center mb-4">
+                        <h3 className="text-lg font-semibold text-white">Configuration</h3>
+                        <button onClick={() => setSelectedNode(null)} className="text-gray-400 hover:text-white text-xl">&times;</button>
+                    </div>
+                    
+                    <div className="space-y-4">
+                        <div>
+                            <label className="block text-sm text-gray-400 mb-1">Node Name</label>
+                            <input 
+                                type="text" 
+                                value={selectedNode.data.label} 
+                                onChange={(e) => updateNodeData('label', e.target.value)}
+                                className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white focus:border-blue-500 outline-none"
+                            />
+                        </div>
+                        
+                        <div>
+                            <label className="block text-sm text-gray-400 mb-1">OS Image</label>
+                            <select 
+                                value={selectedNode.data.image} 
+                                onChange={(e) => updateNodeData('image', e.target.value)}
+                                className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white focus:border-blue-500 outline-none"
+                            >
+                                <option value="ubuntu-20.04">Ubuntu 20.04 LTS</option>
+                                <option value="kali-linux">Kali Linux</option>
+                                <option value="windows-10">Windows 10</option>
+                                <option value="gateway">Gateway/Router</option>
+                                {availableImages.map(img => (
+                                    <option key={img.path} value={img.name}>{img.name} (Custom)</option>
+                                ))}
+                            </select>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                            <div>
+                                <label className="block text-sm text-gray-400 mb-1">CPU Cores</label>
+                                <input 
+                                    type="number" 
+                                    value={selectedNode.data.cpu} 
+                                    onChange={(e) => updateNodeData('cpu', parseInt(e.target.value))}
+                                    className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white focus:border-blue-500 outline-none"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm text-gray-400 mb-1">RAM (MB)</label>
+                                <input 
+                                    type="number" 
+                                    value={selectedNode.data.ram} 
+                                    onChange={(e) => updateNodeData('ram', parseInt(e.target.value))}
+                                    className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white focus:border-blue-500 outline-none"
+                                />
+                            </div>
+                        </div>
+
+                        <div className="border-t border-gray-700 pt-4">
+                            <div className="flex justify-between items-center mb-2">
+                                <label className="block text-sm text-gray-400">Assets & Scripts</label>
+                                <button onClick={addAsset} className="text-xs bg-blue-600 px-2 py-1 rounded text-white hover:bg-blue-500 flex items-center gap-1">
+                                    <Plus size={12} /> Add
+                                </button>
+                            </div>
+                            
+                            <div className="space-y-2">
+                                {selectedNode.data.assets && selectedNode.data.assets.map((asset, idx) => (
+                                    <div key={idx} className="bg-gray-800 p-2 rounded border border-gray-700">
+                                        <div className="flex gap-2 mb-2">
+                                            <select 
+                                                value={asset.type}
+                                                onChange={(e) => updateAsset(idx, 'type', e.target.value)}
+                                                className="bg-gray-700 text-xs rounded p-1 text-white border border-gray-600"
+                                            >
+                                                <option value="package">Install Package</option>
+                                                <option value="command">Run Command</option>
+                                            </select>
+                                            <button onClick={() => removeAsset(idx)} className="ml-auto text-red-400 hover:text-red-300">
+                                                <Trash2 size={14} />
+                                            </button>
+                                        </div>
+                                        <input 
+                                            type="text" 
+                                            value={asset.value}
+                                            onChange={(e) => updateAsset(idx, 'value', e.target.value)}
+                                            placeholder={asset.type === 'package' ? 'e.g. nginx' : 'e.g. systemctl start nginx'}
+                                            className="w-full bg-gray-700 border border-gray-600 rounded p-1 text-sm text-white focus:border-blue-500 outline-none"
+                                        />
+                                    </div>
+                                ))}
+                                {(!selectedNode.data.assets || selectedNode.data.assets.length === 0) && (
+                                    <div className="text-xs text-gray-500 italic text-center py-2">No assets defined</div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </ReactFlowProvider>
+      </div>
+    </div>
+  );
+};
+
+export default NetworkBuilder;

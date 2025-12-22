@@ -1,0 +1,36 @@
+name: "Smart Home PV (SL1-2)"
+description: "Single VM game-server that pulls and runs the Smart Home PV docker-compose lab from the SL1-2 repository."
+scenario:
+  name: "Smart Home PV (SL1-2)"
+  team: "red"
+  objective: "Deploy the Smart Home PV challenge services on a single game-server VM."
+  difficulty: "hard"
+  sources:
+    ubuntu-20.04: "https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-amd64.img"
+
+nodes:
+  - id: "game"
+    label: "game-server (Ubuntu)"
+    config:
+      image: "ubuntu-20.04"
+      cpu: 4
+      ram: 8192
+      assets:
+        - type: package
+          value: git
+        - type: package
+          value: docker.io
+        - type: package
+          value: docker-compose
+        - type: command
+          value: systemctl enable --now docker
+        - type: command
+          value: mkdir -p /opt && chown user:user /opt
+        - type: command
+          value: cd /opt && (test -d sl1-2 || git clone --depth 1 https://github.com/Slayingripper/SL1-2.git sl1-2)
+        - type: command
+          value: docker network inspect playground-net >/dev/null 2>&1 || docker network create --subnet 172.20.0.0/24 playground-net
+        - type: command
+          value: cd /opt/sl1-2/provisioning/files/smart-home-pv && (docker compose up -d --build || docker-compose up -d --build)
+
+edges: []

@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    container_name: cyberrange-backend
+    network_mode: host
+    volumes:
+      - /var/run/libvirt/libvirt-sock:/var/run/libvirt/libvirt-sock
+      - ./backend:/app
+      - ./scenarios:/app/scenarios
+      - ./images:/app/images
+      - ./disks:/app/disks
+    environment:
+      - LIBVIRT_DEFAULT_URI=qemu:///system
+      - HOST_WORK_DIR=${PWD}
+    # We need to run websockify as well. 
+    # For this simple setup, we'll just run the API. 
+    # In a real deployment, use supervisord or separate containers.
+    command: sh -c "uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload"
+    restart: unless-stopped
+
+  frontend:
+    build: 
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: cyberrange-frontend
+    network_mode: host
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_URL=http://localhost:8000/api
+    # This is a dev setup. For production, build and serve with nginx.
+    command: npm run dev -- --host 0.0.0.0
+    restart: unless-stopped
