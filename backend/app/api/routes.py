@@ -16,8 +16,22 @@ import xml.etree.ElementTree as ET
 router = APIRouter()
 
 
+def _normalize_host_work_dir(host_work_dir: str) -> str:
+    if not host_work_dir:
+        return WORK_DIR
+    if host_work_dir == WORK_DIR:
+        return host_work_dir
+    normalized = os.path.normpath(host_work_dir)
+    base = os.path.basename(normalized)
+    if base in {"frontend", "backend"}:
+        parent = os.path.dirname(normalized)
+        if os.path.isabs(parent):
+            return parent
+    return normalized
+
+
 def _host_images_dir() -> str:
-    host_work_dir = os.environ.get("HOST_WORK_DIR", WORK_DIR)
+    host_work_dir = _normalize_host_work_dir(os.environ.get("HOST_WORK_DIR", WORK_DIR))
     return os.path.join(host_work_dir, "images")
 
 

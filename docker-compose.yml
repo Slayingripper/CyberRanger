@@ -32,5 +32,5 @@ services:
     environment:
       - VITE_API_URL=http://localhost:8000/api
     # This is a dev setup. For production, build and serve with nginx.
-    command: npm run dev -- --host 0.0.0.0
+    command: sh -c "if [ ! -d node_modules ] || [ -z \"$$(ls -A node_modules 2>/dev/null)\" ]; then npm ci; fi; npm run dev -- --host 0.0.0.0"
     restart: unless-stopped

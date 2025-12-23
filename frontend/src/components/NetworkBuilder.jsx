@@ -209,6 +209,7 @@ const NetworkBuilder = () => {
   const [selectedNode, setSelectedNode] = useState(null);
   const [availableImages, setAvailableImages] = useState([]);
     const [runtimeVms, setRuntimeVms] = useState([]);
+    const [viewportRestored, setViewportRestored] = useState(false);
   
   // Scenario State
   const [scenarioConfig, setScenarioConfig] = useState({
@@ -261,7 +262,7 @@ const NetworkBuilder = () => {
       return null;
   };
 
-  // Persistence Logic
+  // Persistence Logic - Load saved topology on mount
   useEffect(() => {
       const saved = localStorage.getItem('networkTopology');
       if (saved) {
@@ -276,17 +277,89 @@ const NetworkBuilder = () => {
       }
   }, []);
 
+  // Restore viewport when ReactFlow instance is ready
   useEffect(() => {
-      if (nodes.length > 0 || edges.length > 0) {
-          const topology = { nodes, edges, scenario: scenarioConfig };
-          localStorage.setItem('networkTopology', JSON.stringify(topology));
+      if (reactFlowInstance && !viewportRestored) {
+          const saved = localStorage.getItem('networkTopology');
+          if (saved) {
+              try {
+                  const { viewport } = JSON.parse(saved);
+                  if (viewport) {
+                      // Small delay to ensure ReactFlow is fully initialized
+                      setTimeout(() => {
+                          reactFlowInstance.setViewport(viewport);
+                          setViewportRestored(true);
+                      }, 100);
+                  } else {
+                      // No saved viewport, fit the view to show all nodes
+                      setTimeout(() => {
+                          reactFlowInstance.fitView();
+                          setViewportRestored(true);
+                      }, 100);
+                  }
+              } catch (err) {
+                  console.error('Failed to restore viewport', err);
+                  setViewportRestored(true);
+              }
+          } else {
+              // No saved topology, fit the view
+              setTimeout(() => {
+                  reactFlowInstance.fitView();
+                  setViewportRestored(true);
+              }, 100);
+          }
       }
-  }, [nodes, edges, scenarioConfig]);
+  }, [reactFlowInstance, viewportRestored]);
+
+  // Save topology when it changes
+  useEffect(() => {
+      const saveTopology = () => {
+          if (nodes.length > 0 || edges.length > 0) {
+              const viewport = reactFlowInstance ? reactFlowInstance.getViewport() : null;
+              const topology = { nodes, edges, scenario: scenarioConfig, viewport };
+              localStorage.setItem('networkTopology', JSON.stringify(topology));
+          }
+      };
+      saveTopology();
+  }, [nodes, edges, scenarioConfig, reactFlowInstance]);
+
+  // Save viewport on page unload/visibility change
+  useEffect(() => {
+      const saveViewport = () => {
+          if (reactFlowInstance) {
+              const saved = localStorage.getItem('networkTopology');
+              if (saved) {
+                  try {
+                      const topology = JSON.parse(saved);
+                      topology.viewport = reactFlowInstance.getViewport();
+                      localStorage.setItem('networkTopology', JSON.stringify(topology));
+                  } catch (err) {
+                      console.error('Failed to save viewport', err);
+                  }
+              }
+          }
+      };
+
+      window.addEventListener('beforeunload', saveViewport);
+      window.addEventListener('visibilitychange', saveViewport);
+      document.addEventListener('visibilitychange', saveViewport);
+
+      return () => {
+          window.removeEventListener('beforeunload', saveViewport);
+          window.removeEventListener('visibilitychange', saveViewport);
+          document.removeEventListener('visibilitychange', saveViewport);
+      };
+  }, [reactFlowInstance]);
 
   useEffect(() => {
-      axios.get(`${API_URL}/images`)
-          .then(res => setAvailableImages(res.data))
-          .catch(err => console.error("Failed to fetch images", err));
+      const fetchImages = () => {
+          axios.get(`${API_URL}/images`)
+              .then(res => setAvailableImages(res.data))
+              .catch(err => console.error("Failed to fetch images", err));
+      };
+      fetchImages();
+      const timer = setInterval(fetchImages, 10000); // Refresh every 10 seconds
+      return () => clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -761,8 +834,23 @@ const NetworkBuilder = () => {
                     onDrop={onDrop}
                     onDragOver={onDragOver}
                     onNodeClick={onNodeClick}
+                    onMove={() => {
+                        // Save viewport position as user moves around
+                        if (reactFlowInstance && viewportRestored) {
+                            const saved = localStorage.getItem('networkTopology');
+                            if (saved) {
+                                try {
+                                    const topology = JSON.parse(saved);
+                                    topology.viewport = reactFlowInstance.getViewport();
+                                    localStorage.setItem('networkTopology', JSON.stringify(topology));
+                                } catch (err) {
+                                    // Silently fail to avoid console spam
+                                }
+                            }
+                        }
+                    }}
                     nodeTypes={nodeTypes}
-                    fitView
+                    fitView={false}
                     className="bg-gray-950"
                 >
                     <Controls />

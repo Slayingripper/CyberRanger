@@ -8,9 +8,23 @@ import httpx
 
 router = APIRouter()
 
+
+def _normalize_host_work_dir(host_work_dir: str) -> str:
+    if not host_work_dir:
+        return "/app"
+    if host_work_dir == "/app":
+        return host_work_dir
+    normalized = os.path.normpath(host_work_dir)
+    base = os.path.basename(normalized)
+    if base in {"frontend", "backend"}:
+        parent = os.path.dirname(normalized)
+        if os.path.isabs(parent):
+            return parent
+    return normalized
+
 IMAGES_DIR = "/app/images"
 # We need to know the host path to pass to libvirt
-HOST_WORK_DIR = os.environ.get("HOST_WORK_DIR", "/app")
+HOST_WORK_DIR = _normalize_host_work_dir(os.environ.get("HOST_WORK_DIR", "/app"))
 HOST_IMAGES_DIR = os.path.join(HOST_WORK_DIR, "images")
 
 # Global dictionary to track download progress
