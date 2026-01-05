@@ -12,6 +12,7 @@ import { Play, Plus, Trash2, Upload, FileText, Target, Shield, Flag } from 'luci
 import yaml from 'js-yaml';
 import axios from 'axios';
 import CustomNode from './CustomNode';
+import Modal from './Modal';
 
 const initialNodes = [
   {
@@ -189,6 +190,7 @@ const PREDEFINED_TOPOLOGIES = {
         ]
     }
 };
+let id = 0;
 const getId = () => `dndnode_${id++}`;
 
 const API_URL = 'http://localhost:8001/api';
@@ -220,6 +222,7 @@ const NetworkBuilder = () => {
     const [deployJobId, setDeployJobId] = useState(null);
     const [deployJob, setDeployJob] = useState(null);
     const [deployJobError, setDeployJobError] = useState(null);
+    const [messageModal, setMessageModal] = useState({ isOpen: false, title: '', message: '', type: 'info' });
 
   const nodeTypes = useMemo(() => ({ custom: CustomNode }), []);
 
@@ -348,6 +351,7 @@ const NetworkBuilder = () => {
           window.removeEventListener('beforeunload', saveViewport);
           window.removeEventListener('visibilitychange', saveViewport);
           document.removeEventListener('visibilitychange', saveViewport);
+          saveViewport();
       };
   }, [reactFlowInstance]);
 
@@ -423,10 +427,10 @@ const NetworkBuilder = () => {
                   setEdges(newEdges);
               }
               
-              alert("Topology loaded successfully!");
+              setMessageModal({ isOpen: true, title: 'Success', message: 'Topology loaded successfully!', type: 'success' });
           } catch (err) {
               console.error(err);
-              alert("Failed to parse YAML file: " + err.message);
+              setMessageModal({ isOpen: true, title: 'Error', message: "Failed to parse YAML file: " + err.message, type: 'error' });
           }
       };
       reader.readAsText(file);
@@ -524,11 +528,80 @@ const NetworkBuilder = () => {
       updateNodeData('assets', currentAssets);
   };
 
+  // Restore deploy job on mount
+  useEffect(() => {
+      const savedJobId = localStorage.getItem('deployJobId');
+      if (savedJobId) {
+          setDeployJobId(savedJobId);
+          setIsDeploying(true);
+      }
+  }, []);
+
+  // Poll for deploy job status
+  useEffect(() => {
+      if (!deployJobId) return;
+
+      let isMounted = true;
+      let timeoutId;
+
+      const poll = async () => {
+          try {
+              const jobRes = await axios.get(`${API_URL}/topology/deploy-jobs/${deployJobId}`);
+              if (!isMounted) return;
+              
+              setDeployJob(jobRes.data);
+              const status = jobRes.data?.status;
+              
+              if (status === 'completed' || status === 'failed') {
+                  setIsDeploying(false);
+                  localStorage.removeItem('deployJobId');
+                  setDeployJobId(null);
+                  
+                  const result = jobRes.data?.result;
+                  const results = result?.results || [];
+                  const errors = results.filter(r => r.status === 'error');
+                  const successes = results.filter(r => r.status === 'success');
+
+                  let message = `Deployment finished!\n`;
+                  message += `Successful VMs: ${successes.length}\n`;
+                  message += `Failed VMs: ${errors.length}\n`;
+                  if (errors.length > 0) {
+                      message += "\nErrors:\n";
+                      errors.forEach(e => {
+                          message += `- ${e.node || e.name || 'Unknown Node'}: ${e.message || e.detail || 'error'}\n`;
+                      });
+                  }
+                  setMessageModal({ isOpen: true, title: 'Deployment Finished', message: message, type: errors.length > 0 ? 'error' : 'success' });
+              } else {
+                  timeoutId = setTimeout(poll, 1000);
+              }
+          } catch (e) {
+              console.error("Poll error:", e);
+              if (isMounted) {
+                   if (e.response && e.response.status === 404) {
+                       setIsDeploying(false);
+                       localStorage.removeItem('deployJobId');
+                       setDeployJobId(null);
+                   } else {
+                       timeoutId = setTimeout(poll, 2000);
+                   }
+              }
+          }
+      };
+
+      poll();
+
+      return () => { 
+          isMounted = false; 
+          if (timeoutId) clearTimeout(timeoutId);
+      };
+  }, [deployJobId]);
+
   const handleDeploy = async () => {
       console.log("Deploy button clicked");
       
       if (nodes.length === 0) {
-          alert("Cannot deploy an empty topology. Please add some nodes.");
+          setMessageModal({ isOpen: true, title: 'Warning', message: "Cannot deploy an empty topology. Please add some nodes.", type: 'error' });
           return;
       }
 
@@ -567,39 +640,12 @@ const NetworkBuilder = () => {
               throw new Error('Backend did not return a job_id');
           }
           setDeployJobId(jobId);
-          while (true) {
-              const jobRes = await axios.get(`${API_URL}/topology/deploy-jobs/${jobId}`);
-              setDeployJob(jobRes.data);
-
-              const status = jobRes.data?.status;
-              if (status === 'completed' || status === 'failed') {
-                  const result = jobRes.data?.result;
-                  const results = result?.results || [];
-                  const errors = results.filter(r => r.status === 'error');
-                  const successes = results.filter(r => r.status === 'success');
-
-                  let message = `Deployment finished for scenario: ${scenarioConfig.name}!\n`;
-                  message += `Successful VMs: ${successes.length}\n`;
-                  message += `Failed VMs: ${errors.length}\n`;
-                  if (errors.length > 0) {
-                      message += "\nErrors:\n";
-                      errors.forEach(e => {
-                          message += `- ${e.node || e.name || 'Unknown Node'}: ${e.message || e.detail || 'error'}\n`;
-                      });
-                  }
-                  alert(message);
-                  break;
-              }
-
-              // wait before next poll
-              await new Promise(r => setTimeout(r, 750));
-          }
+          localStorage.setItem('deployJobId', jobId);
       } catch (e) {
           console.error("Deployment error:", e);
           const errorMsg = e.response?.data?.detail || e.message || 'Unknown error';
           setDeployJobError(errorMsg);
-          alert('Deployment failed: ' + errorMsg + "\n\nCheck console for details.");
-      } finally {
+          setMessageModal({ isOpen: true, title: 'Deployment Failed', message: 'Deployment failed: ' + errorMsg + "\n\nCheck console for details.", type: 'error' });
           setIsDeploying(false);
       }
   };
@@ -611,7 +657,7 @@ const NetworkBuilder = () => {
             <h2 className="text-xl font-bold text-primary">Network Topology Builder</h2>
             
             <div className="relative group">
-                <button className="flex items-center gap-2 bg-surfaceHover hover:bg-border px-3 py-1.5 rounded text-sm transition-colors">
+                <button className="flex items-center gap-2 bg-surfaceHover hover:bg-surface px-3 py-1.5 rounded text-sm transition-colors text-primary">
                     <FileText size={14} /> Load Preset
                 </button>
                 <div className="absolute top-full left-0 pt-2 w-48 hidden group-hover:block z-50">
@@ -625,12 +671,12 @@ const NetworkBuilder = () => {
                 </div>
             </div>
 
-            <label className="flex items-center gap-2 bg-surfaceHover hover:bg-border px-3 py-1.5 rounded text-sm cursor-pointer transition-colors">
+            <label className="flex items-center gap-2 bg-surfaceHover hover:bg-surface px-3 py-1.5 rounded text-sm cursor-pointer transition-colors">
                 <Upload size={14} /> Upload YAML
                 <input type="file" accept=".yaml,.yml" onChange={handleFileUpload} className="hidden" />
             </label>
 
-            <button onClick={() => setShowScenarioSettings(true)} className="flex items-center gap-2 bg-accent/50 hover:bg-accent border border-accent px-3 py-1.5 rounded text-sm transition-colors text-primary">
+            <button onClick={() => setShowScenarioSettings(true)} className="flex items-center gap-2 bg-accent/30 hover:bg-accent border border-accent px-3 py-1.5 rounded text-sm transition-colors text-accent">
                 <Target size={14} /> Scenario Settings
             </button>
         </div>
@@ -638,7 +684,7 @@ const NetworkBuilder = () => {
         <button 
             onClick={handleDeploy} 
             disabled={isDeploying}
-            className={`flex items-center gap-2 px-4 py-2 rounded transition-colors ${isDeploying ? 'bg-green-800 cursor-not-allowed text-secondary' : 'bg-green-600 hover:bg-green-700 text-primary'}`}
+            className={`flex items-center gap-2 px-4 py-2 rounded transition-colors ${isDeploying ? 'bg-green-800 cursor-not-allowed text-secondary' : 'bg-green-600 hover:bg-green-700 text-white'}`}
         >
             {isDeploying ? (
                 <>
@@ -698,7 +744,7 @@ const NetworkBuilder = () => {
                                             </div>
                                             <div className="mt-2 h-2 w-full bg-surfaceHover rounded overflow-hidden">
                                                 <div
-                                                    className="h-2 bg-accent"
+                                                    className="h-2 bg-blue-600"
                                                     style={{ width: `${Math.max(0, Math.min(100, percent))}%` }}
                                                 />
                                             </div>
@@ -758,12 +804,12 @@ const NetworkBuilder = () => {
 
                 <div className="text-secondary text-sm font-medium mt-4 mb-2">Available Images</div>
                 {availableImages.length === 0 && (
-                    <div className="text-xs text-secondary italic">No images found.</div>
+                    <div className="text-xs text-muted italic">No images found.</div>
                 )}
                 {availableImages.map((img) => (
                     <div 
                         key={img.path}
-                        className="dndnode input p-3 bg-accent/30 border border-accent rounded cursor-grab text-primary hover:bg-accent/50 transition-colors flex items-center gap-2 mb-2" 
+                        className="dndnode input p-3 bg-blue-900/30 border border-blue-700 rounded cursor-grab text-blue-100 hover:bg-blue-900/50 transition-colors flex items-center gap-2 mb-2" 
                         onDragStart={(event) => {
                             event.dataTransfer.setData('application/reactflow', 'vm');
                             event.dataTransfer.setData('image', img.name);
@@ -775,13 +821,13 @@ const NetworkBuilder = () => {
                 ))}
                 
                 <div className="text-secondary text-sm font-medium mt-4 mb-2">Generic Nodes</div>
-                <div className="dndnode input p-3 bg-surface border border-border rounded cursor-grab text-secondary hover:bg-surfaceHover transition-colors flex items-center gap-2" onDragStart={(event) => event.dataTransfer.setData('application/reactflow', 'vm')} draggable>
+                <div className="dndnode input p-3 bg-surface border border-border rounded cursor-grab text-primary hover:bg-surfaceHover transition-colors flex items-center gap-2" onDragStart={(event) => event.dataTransfer.setData('application/reactflow', 'vm')} draggable>
                     <Shield size={16} /> Generic VM
                 </div>
             </div>
 
             <div className="flex-grow h-full relative" ref={reactFlowWrapper}>
-                <div className="absolute top-0 left-0 right-0 z-20 bg-background/95 border-b border-gray-800 px-4 py-3 space-y-3">
+                <div className="absolute top-0 left-0 right-0 z-20 bg-background/95 border-b border-surface px-4 py-3 space-y-3">
                     <div>
                         <div className="text-sm text-primary font-semibold">Live VM IPs</div>
                         {nodes.length === 0 && <div className="text-xs text-secondary">No nodes yet.</div>}
@@ -861,7 +907,7 @@ const NetworkBuilder = () => {
             {showScenarioSettings && (
                 <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
                     <div className="bg-surface p-6 rounded-xl border border-border w-full max-w-md">
-                        <h3 className="text-xl font-bold mb-4">Scenario Configuration</h3>
+                        <h3 className="text-xl font-bold mb-4 text-primary">Scenario Configuration</h3>
                         
                         <div className="space-y-4">
                             <div>
@@ -870,7 +916,7 @@ const NetworkBuilder = () => {
                                     type="text" 
                                     value={scenarioConfig.name}
                                     onChange={(e) => setScenarioConfig({...scenarioConfig, name: e.target.value})}
-                                    className="w-full bg-background border border-border rounded p-2"
+                                    className="w-full bg-background border border-border rounded p-2 text-primary"
                                 />
                             </div>
 
@@ -881,7 +927,7 @@ const NetworkBuilder = () => {
                                     value={scenarioConfig.network_prefix || ''}
                                     onChange={(e) => setScenarioConfig({ ...scenarioConfig, network_prefix: e.target.value })}
                                     placeholder="Leave blank for a random per-deploy network name"
-                                    className="w-full bg-background border border-border rounded p-2"
+                                    className="w-full bg-background border border-border rounded p-2 text-primary"
                                 />
                                 <div className="text-xs text-secondary mt-1">
                                     If set, libvirt networks will be named like <span className="font-mono">cyberange-&lt;prefix&gt;-c0</span>.
@@ -893,7 +939,7 @@ const NetworkBuilder = () => {
                                 <select 
                                     value={scenarioConfig.team}
                                     onChange={(e) => setScenarioConfig({...scenarioConfig, team: e.target.value})}
-                                    className="w-full bg-background border border-border rounded p-2"
+                                    className="w-full bg-background border border-border rounded p-2 text-primary"
                                 >
                                     <option value="blue">Blue Team (Defense)</option>
                                     <option value="red">Red Team (Offense)</option>
@@ -906,7 +952,7 @@ const NetworkBuilder = () => {
                                 <select 
                                     value={scenarioConfig.difficulty}
                                     onChange={(e) => setScenarioConfig({...scenarioConfig, difficulty: e.target.value})}
-                                    className="w-full bg-background border border-border rounded p-2"
+                                    className="w-full bg-background border border-border rounded p-2 text-primary"
                                 >
                                     <option value="easy">Easy</option>
                                     <option value="medium">Medium</option>
@@ -920,7 +966,7 @@ const NetworkBuilder = () => {
                                 <textarea 
                                     value={scenarioConfig.objective}
                                     onChange={(e) => setScenarioConfig({...scenarioConfig, objective: e.target.value})}
-                                    className="w-full bg-background border border-border rounded p-2 h-32"
+                                    className="w-full bg-background border border-border rounded p-2 h-32 text-primary"
                                 />
                             </div>
                         </div>
@@ -948,7 +994,7 @@ const NetworkBuilder = () => {
                                 type="text" 
                                 value={selectedNode.data.label} 
                                 onChange={(e) => updateNodeData('label', e.target.value)}
-                                className="w-full bg-surface border border-border rounded p-2 text-primary focus:border-blue-500 outline-none"
+                                className="w-full bg-surface border border-border rounded p-2 text-primary focus:border-accent outline-none"
                             />
                         </div>
                         
@@ -957,7 +1003,7 @@ const NetworkBuilder = () => {
                             <select 
                                 value={selectedNode.data.image} 
                                 onChange={(e) => updateNodeData('image', e.target.value)}
-                                className="w-full bg-surface border border-border rounded p-2 text-primary focus:border-blue-500 outline-none"
+                                className="w-full bg-surface border border-border rounded p-2 text-primary focus:border-accent outline-none"
                             >
                                 <option value="ubuntu-20.04">Ubuntu 20.04 LTS</option>
                                 <option value="kali-linux">Kali Linux</option>
@@ -976,7 +1022,7 @@ const NetworkBuilder = () => {
                                     type="number" 
                                     value={selectedNode.data.cpu} 
                                     onChange={(e) => updateNodeData('cpu', parseInt(e.target.value))}
-                                    className="w-full bg-surface border border-border rounded p-2 text-primary focus:border-blue-500 outline-none"
+                                    className="w-full bg-surface border border-border rounded p-2 text-primary focus:border-accent outline-none"
                                 />
                             </div>
                             <div>
@@ -985,7 +1031,7 @@ const NetworkBuilder = () => {
                                     type="number" 
                                     value={selectedNode.data.ram} 
                                     onChange={(e) => updateNodeData('ram', parseInt(e.target.value))}
-                                    className="w-full bg-surface border border-border rounded p-2 text-primary focus:border-blue-500 outline-none"
+                                    className="w-full bg-surface border border-border rounded p-2 text-primary focus:border-accent outline-none"
                                 />
                             </div>
                         </div>
@@ -993,7 +1039,7 @@ const NetworkBuilder = () => {
                         <div className="border-t border-border pt-4">
                             <div className="flex justify-between items-center mb-2">
                                 <label className="block text-sm text-secondary">Assets & Scripts</label>
-                                <button onClick={addAsset} className="text-xs bg-accent px-2 py-1 rounded text-primary hover:bg-blue-500 flex items-center gap-1">
+                                <button onClick={addAsset} className="text-xs bg-accent px-2 py-1 rounded text-primary hover:bg-accentHover flex items-center gap-1">
                                     <Plus size={12} /> Add
                                 </button>
                             </div>
@@ -1019,7 +1065,7 @@ const NetworkBuilder = () => {
                                             value={asset.value}
                                             onChange={(e) => updateAsset(idx, 'value', e.target.value)}
                                             placeholder={asset.type === 'package' ? 'e.g. nginx' : 'e.g. systemctl start nginx'}
-                                            className="w-full bg-surfaceHover border border-border rounded p-1 text-sm text-primary focus:border-blue-500 outline-none"
+                                            className="w-full bg-surfaceHover border border-border rounded p-1 text-sm text-primary focus:border-accent outline-none"
                                         />
                                     </div>
                                 ))}
@@ -1033,6 +1079,19 @@ const NetworkBuilder = () => {
             )}
         </ReactFlowProvider>
       </div>
+
+      <Modal
+        isOpen={messageModal.isOpen}
+        onClose={() => setMessageModal({ ...messageModal, isOpen: false })}
+        title={messageModal.title}
+        footer={
+            <button onClick={() => setMessageModal({ ...messageModal, isOpen: false })} className="px-4 py-2 bg-surface hover:bg-surfaceHover text-primary rounded">Close</button>
+        }
+      >
+        <div className={`text-sm whitespace-pre-wrap ${messageModal.type === 'error' ? 'text-red-400' : messageModal.type === 'success' ? 'text-green-400' : 'text-secondary'}`}>
+            {messageModal.message}
+        </div>
+      </Modal>
     </div>
   );
 };
