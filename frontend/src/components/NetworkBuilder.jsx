@@ -605,32 +605,32 @@ const NetworkBuilder = () => {
   };
 
   return (
-    <div className="dndflow w-full flex flex-col bg-gray-900 text-white" style={{ height: 'calc(100vh - 100px)' }}>
-      <div className="flex justify-between items-center p-4 bg-gray-800 border-b border-gray-700">
+    <div className="dndflow w-full flex flex-col bg-background text-primary" style={{ height: 'calc(100vh - 100px)' }}>
+      <div className="flex justify-between items-center p-4 bg-surface border-b border-border">
         <div className="flex items-center gap-4">
-            <h2 className="text-xl font-bold text-white">Network Topology Builder</h2>
+            <h2 className="text-xl font-bold text-primary">Network Topology Builder</h2>
             
             <div className="relative group">
-                <button className="flex items-center gap-2 bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-sm transition-colors">
+                <button className="flex items-center gap-2 bg-surfaceHover hover:bg-border px-3 py-1.5 rounded text-sm transition-colors">
                     <FileText size={14} /> Load Preset
                 </button>
                 <div className="absolute top-full left-0 pt-2 w-48 hidden group-hover:block z-50">
-                    <div className="bg-gray-800 border border-gray-700 rounded shadow-xl overflow-hidden">
-                        <button onClick={() => loadPreset('simple-client-server')} className="block w-full text-left px-4 py-2 hover:bg-gray-700 text-sm">Simple Client-Server</button>
-                        <button onClick={() => loadPreset('iso-install-lab')} className="block w-full text-left px-4 py-2 hover:bg-gray-700 text-sm">ISO Install Lab (Linux)</button>
-                        <button onClick={() => loadPreset('sl1-2-smart-home-pv')} className="block w-full text-left px-4 py-2 hover:bg-gray-700 text-sm">Smart Home PV (SL1-2)</button>
-                        <button onClick={() => loadPreset('sl1-2-smart-home-pv-3vm')} className="block w-full text-left px-4 py-2 hover:bg-gray-700 text-sm">Smart Home PV (SL1-2) - 3 VMs</button>
-                        <button onClick={() => loadPreset('attacker-victim')} className="block w-full text-left px-4 py-2 hover:bg-gray-700 text-sm">Attacker vs Victim (Linux)</button>
+                    <div className="bg-surface border border-border rounded shadow-xl overflow-hidden">
+                        <button onClick={() => loadPreset('simple-client-server')} className="block w-full text-left px-4 py-2 hover:bg-surfaceHover text-sm">Simple Client-Server</button>
+                        <button onClick={() => loadPreset('iso-install-lab')} className="block w-full text-left px-4 py-2 hover:bg-surfaceHover text-sm">ISO Install Lab (Linux)</button>
+                        <button onClick={() => loadPreset('sl1-2-smart-home-pv')} className="block w-full text-left px-4 py-2 hover:bg-surfaceHover text-sm">Smart Home PV (SL1-2)</button>
+                        <button onClick={() => loadPreset('sl1-2-smart-home-pv-3vm')} className="block w-full text-left px-4 py-2 hover:bg-surfaceHover text-sm">Smart Home PV (SL1-2) - 3 VMs</button>
+                        <button onClick={() => loadPreset('attacker-victim')} className="block w-full text-left px-4 py-2 hover:bg-surfaceHover text-sm">Attacker vs Victim (Linux)</button>
                     </div>
                 </div>
             </div>
 
-            <label className="flex items-center gap-2 bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-sm cursor-pointer transition-colors">
+            <label className="flex items-center gap-2 bg-surfaceHover hover:bg-border px-3 py-1.5 rounded text-sm cursor-pointer transition-colors">
                 <Upload size={14} /> Upload YAML
                 <input type="file" accept=".yaml,.yml" onChange={handleFileUpload} className="hidden" />
             </label>
 
-            <button onClick={() => setShowScenarioSettings(true)} className="flex items-center gap-2 bg-blue-900/50 hover:bg-blue-900 border border-blue-800 px-3 py-1.5 rounded text-sm transition-colors text-blue-200">
+            <button onClick={() => setShowScenarioSettings(true)} className="flex items-center gap-2 bg-accent/50 hover:bg-accent border border-accent px-3 py-1.5 rounded text-sm transition-colors text-primary">
                 <Target size={14} /> Scenario Settings
             </button>
         </div>
@@ -638,7 +638,7 @@ const NetworkBuilder = () => {
         <button 
             onClick={handleDeploy} 
             disabled={isDeploying}
-            className={`flex items-center gap-2 px-4 py-2 rounded transition-colors ${isDeploying ? 'bg-green-800 cursor-not-allowed text-gray-300' : 'bg-green-600 hover:bg-green-700 text-white'}`}
+            className={`flex items-center gap-2 px-4 py-2 rounded transition-colors ${isDeploying ? 'bg-green-800 cursor-not-allowed text-secondary' : 'bg-green-600 hover:bg-green-700 text-primary'}`}
         >
             {isDeploying ? (
                 <>
@@ -654,24 +654,24 @@ const NetworkBuilder = () => {
       </div>
 
             {(isDeploying || deployJob) && (
-                <div className="bg-gray-900 border-b border-gray-700 px-4 py-3">
+                <div className="bg-background border-b border-border px-4 py-3">
                     <div className="flex items-center justify-between gap-4">
                         <div className="text-sm">
-                            <div className="text-gray-200 font-medium">Deploy Progress</div>
-                            <div className="text-gray-400">
+                            <div className="text-primary font-medium">Deploy Progress</div>
+                            <div className="text-secondary">
                                 {deployJob?.message || (isDeploying ? 'Starting…' : '')}
                                 {deployJobId ? ` (job ${deployJobId.slice(0, 8)}…)` : ''}
                             </div>
                             {deployJobError && <div className="text-red-300 mt-1">Error: {deployJobError}</div>}
                         </div>
-                        <div className="text-xs text-gray-400">
+                        <div className="text-xs text-secondary">
                             Status: {deployJob?.status || (isDeploying ? 'running' : 'idle')}
                         </div>
                     </div>
 
                     {deployJob?.progress?.downloads && Object.keys(deployJob.progress.downloads).length > 0 && (
                         <div className="mt-3">
-                            <div className="text-xs text-gray-400 mb-2">Downloads</div>
+                            <div className="text-xs text-secondary mb-2">Downloads</div>
                             <div className="space-y-2">
                                 {Object.entries(deployJob.progress.downloads).map(([name, d]) => {
                                     const percent = typeof d?.percent === 'number' ? d.percent : 0;
@@ -691,14 +691,14 @@ const NetworkBuilder = () => {
                                     const label = rightBits.join(' · ');
 
                                     return (
-                                        <div key={name} className="bg-gray-800 border border-gray-700 rounded p-2">
+                                        <div key={name} className="bg-surface border border-border rounded p-2">
                                             <div className="flex items-center justify-between text-xs">
-                                                <div className="text-gray-200 truncate" title={name}>{name}</div>
-                                                <div className="text-gray-400 ml-2">{label}</div>
+                                                <div className="text-primary truncate" title={name}>{name}</div>
+                                                <div className="text-secondary ml-2">{label}</div>
                                             </div>
-                                            <div className="mt-2 h-2 w-full bg-gray-700 rounded overflow-hidden">
+                                            <div className="mt-2 h-2 w-full bg-surfaceHover rounded overflow-hidden">
                                                 <div
-                                                    className="h-2 bg-blue-600"
+                                                    className="h-2 bg-accent"
                                                     style={{ width: `${Math.max(0, Math.min(100, percent))}%` }}
                                                 />
                                             </div>
@@ -711,7 +711,7 @@ const NetworkBuilder = () => {
 
                     {deployJob?.progress?.nodes && Object.keys(deployJob.progress.nodes).length > 0 && (
                         <div className="mt-3">
-                            <div className="text-xs text-gray-400 mb-2">VMs</div>
+                            <div className="text-xs text-secondary mb-2">VMs</div>
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                                 {Object.entries(deployJob.progress.nodes).map(([id, n]) => {
                                     const status = n?.status || 'pending';
@@ -726,13 +726,13 @@ const NetworkBuilder = () => {
                                     const percent = pctMap[status] ?? 0;
 
                                     return (
-                                        <div key={id} className="bg-gray-800 border border-gray-700 rounded p-2">
+                                        <div key={id} className="bg-surface border border-border rounded p-2">
                                             <div className="flex items-center justify-between text-xs">
-                                                <div className="text-gray-200 truncate" title={n?.label || id}>{n?.label || id}</div>
-                                                <div className={`ml-2 ${status === 'error' ? 'text-red-300' : 'text-gray-400'}`}>{status}</div>
+                                                <div className="text-primary truncate" title={n?.label || id}>{n?.label || id}</div>
+                                                <div className={`ml-2 ${status === 'error' ? 'text-red-300' : 'text-secondary'}`}>{status}</div>
                                             </div>
                                             {msg && <div className="text-xs text-red-300 mt-1 truncate" title={msg}>{msg}</div>}
-                                            <div className="mt-2 h-2 w-full bg-gray-700 rounded overflow-hidden">
+                                            <div className="mt-2 h-2 w-full bg-surfaceHover rounded overflow-hidden">
                                                 <div
                                                     className={status === 'error' ? 'h-2 bg-red-600' : 'h-2 bg-green-600'}
                                                     style={{ width: `${Math.max(0, Math.min(100, percent))}%` }}
@@ -749,21 +749,21 @@ const NetworkBuilder = () => {
       
       <div className="flex-grow flex h-full overflow-hidden">
         <ReactFlowProvider>
-            <div className="w-64 bg-gray-900 border-r border-gray-700 p-4 flex flex-col gap-4 z-10 overflow-y-auto">
-                <div className="text-gray-400 text-sm font-medium mb-2">Network Nodes</div>
+            <div className="w-64 bg-background border-r border-border p-4 flex flex-col gap-4 z-10 overflow-y-auto">
+                <div className="text-secondary text-sm font-medium mb-2">Network Nodes</div>
                 
                 <div className="dndnode output p-3 bg-purple-900/30 border border-purple-700 rounded cursor-grab text-purple-100 hover:bg-purple-900/50 transition-colors flex items-center gap-2" onDragStart={(event) => event.dataTransfer.setData('application/reactflow', 'router')} draggable>
                     <Flag size={16} /> Router / Gateway
                 </div>
 
-                <div className="text-gray-400 text-sm font-medium mt-4 mb-2">Available Images</div>
+                <div className="text-secondary text-sm font-medium mt-4 mb-2">Available Images</div>
                 {availableImages.length === 0 && (
-                    <div className="text-xs text-gray-500 italic">No images found.</div>
+                    <div className="text-xs text-secondary italic">No images found.</div>
                 )}
                 {availableImages.map((img) => (
                     <div 
                         key={img.path}
-                        className="dndnode input p-3 bg-blue-900/30 border border-blue-700 rounded cursor-grab text-blue-100 hover:bg-blue-900/50 transition-colors flex items-center gap-2 mb-2" 
+                        className="dndnode input p-3 bg-accent/30 border border-accent rounded cursor-grab text-primary hover:bg-accent/50 transition-colors flex items-center gap-2 mb-2" 
                         onDragStart={(event) => {
                             event.dataTransfer.setData('application/reactflow', 'vm');
                             event.dataTransfer.setData('image', img.name);
@@ -774,26 +774,26 @@ const NetworkBuilder = () => {
                     </div>
                 ))}
                 
-                <div className="text-gray-400 text-sm font-medium mt-4 mb-2">Generic Nodes</div>
-                <div className="dndnode input p-3 bg-gray-800 border border-gray-600 rounded cursor-grab text-gray-300 hover:bg-gray-700 transition-colors flex items-center gap-2" onDragStart={(event) => event.dataTransfer.setData('application/reactflow', 'vm')} draggable>
+                <div className="text-secondary text-sm font-medium mt-4 mb-2">Generic Nodes</div>
+                <div className="dndnode input p-3 bg-surface border border-border rounded cursor-grab text-secondary hover:bg-surfaceHover transition-colors flex items-center gap-2" onDragStart={(event) => event.dataTransfer.setData('application/reactflow', 'vm')} draggable>
                     <Shield size={16} /> Generic VM
                 </div>
             </div>
 
             <div className="flex-grow h-full relative" ref={reactFlowWrapper}>
-                <div className="absolute top-0 left-0 right-0 z-20 bg-gray-900/95 border-b border-gray-800 px-4 py-3 space-y-3">
+                <div className="absolute top-0 left-0 right-0 z-20 bg-background/95 border-b border-gray-800 px-4 py-3 space-y-3">
                     <div>
-                        <div className="text-sm text-gray-200 font-semibold">Live VM IPs</div>
-                        {nodes.length === 0 && <div className="text-xs text-gray-500">No nodes yet.</div>}
+                        <div className="text-sm text-primary font-semibold">Live VM IPs</div>
+                        {nodes.length === 0 && <div className="text-xs text-secondary">No nodes yet.</div>}
                         {nodes.length > 0 && (
                             <div className="grid md:grid-cols-2 gap-2 mt-2">
                                 {nodes.map(n => {
                                     const info = vmInfoForNode(n.id);
                                     const ip = primaryIp(info);
                                     return (
-                                        <div key={n.id} className="bg-gray-800 border border-gray-700 rounded p-2 text-xs text-gray-200 flex justify-between">
+                                        <div key={n.id} className="bg-surface border border-border rounded p-2 text-xs text-primary flex justify-between">
                                             <div className="truncate" title={n.data.label}>{n.data.label}</div>
-                                            <div className="text-gray-400 ml-2" title={info ? (ip || 'No IP yet') : 'VM not found'}>
+                                            <div className="text-secondary ml-2" title={info ? (ip || 'No IP yet') : 'VM not found'}>
                                                 {info ? (ip || 'IP pending') : 'not deployed'}
                                             </div>
                                         </div>
@@ -805,17 +805,17 @@ const NetworkBuilder = () => {
 
                     {edges.length > 0 && (
                         <div>
-                            <div className="text-sm text-gray-200 font-semibold">Connections</div>
-                            <div className="grid md:grid-cols-2 gap-2 mt-2 text-xs text-gray-200">
+                            <div className="text-sm text-primary font-semibold">Connections</div>
+                            <div className="grid md:grid-cols-2 gap-2 mt-2 text-xs text-primary">
                                 {edges.map(e => {
                                     const src = nodes.find(n => n.id === e.source);
                                     const dst = nodes.find(n => n.id === e.target);
                                     const srcIp = primaryIp(vmInfoForNode(e.source));
                                     const dstIp = primaryIp(vmInfoForNode(e.target));
                                     return (
-                                        <div key={e.id} className="bg-gray-800 border border-gray-700 rounded px-2 py-1 flex justify-between items-center">
+                                        <div key={e.id} className="bg-surface border border-border rounded px-2 py-1 flex justify-between items-center">
                                             <div className="truncate" title={src?.data?.label || e.source}>{src?.data?.label || e.source} {srcIp ? `(${srcIp})` : ''}</div>
-                                            <div className="text-gray-500 mx-2">↔</div>
+                                            <div className="text-secondary mx-2">↔</div>
                                             <div className="truncate text-right" title={dst?.data?.label || e.target}>{dst?.data?.label || e.target} {dstIp ? `(${dstIp})` : ''}</div>
                                         </div>
                                     );
@@ -851,7 +851,7 @@ const NetworkBuilder = () => {
                     }}
                     nodeTypes={nodeTypes}
                     fitView={false}
-                    className="bg-gray-950"
+                    className="bg-background"
                 >
                     <Controls />
                     <Background color="#333" gap={16} />
@@ -860,40 +860,40 @@ const NetworkBuilder = () => {
 
             {showScenarioSettings && (
                 <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-                    <div className="bg-gray-800 p-6 rounded-xl border border-gray-700 w-full max-w-md">
+                    <div className="bg-surface p-6 rounded-xl border border-border w-full max-w-md">
                         <h3 className="text-xl font-bold mb-4">Scenario Configuration</h3>
                         
                         <div className="space-y-4">
                             <div>
-                                <label className="block text-sm text-gray-400 mb-1">Scenario Name</label>
+                                <label className="block text-sm text-secondary mb-1">Scenario Name</label>
                                 <input 
                                     type="text" 
                                     value={scenarioConfig.name}
                                     onChange={(e) => setScenarioConfig({...scenarioConfig, name: e.target.value})}
-                                    className="w-full bg-gray-900 border border-gray-700 rounded p-2"
+                                    className="w-full bg-background border border-border rounded p-2"
                                 />
                             </div>
 
                             <div>
-                                <label className="block text-sm text-gray-400 mb-1">Network Prefix (optional)</label>
+                                <label className="block text-sm text-secondary mb-1">Network Prefix (optional)</label>
                                 <input
                                     type="text"
                                     value={scenarioConfig.network_prefix || ''}
                                     onChange={(e) => setScenarioConfig({ ...scenarioConfig, network_prefix: e.target.value })}
                                     placeholder="Leave blank for a random per-deploy network name"
-                                    className="w-full bg-gray-900 border border-gray-700 rounded p-2"
+                                    className="w-full bg-background border border-border rounded p-2"
                                 />
-                                <div className="text-xs text-gray-500 mt-1">
+                                <div className="text-xs text-secondary mt-1">
                                     If set, libvirt networks will be named like <span className="font-mono">cyberange-&lt;prefix&gt;-c0</span>.
                                 </div>
                             </div>
                             
                             <div>
-                                <label className="block text-sm text-gray-400 mb-1">Team / Type</label>
+                                <label className="block text-sm text-secondary mb-1">Team / Type</label>
                                 <select 
                                     value={scenarioConfig.team}
                                     onChange={(e) => setScenarioConfig({...scenarioConfig, team: e.target.value})}
-                                    className="w-full bg-gray-900 border border-gray-700 rounded p-2"
+                                    className="w-full bg-background border border-border rounded p-2"
                                 >
                                     <option value="blue">Blue Team (Defense)</option>
                                     <option value="red">Red Team (Offense)</option>
@@ -902,11 +902,11 @@ const NetworkBuilder = () => {
                             </div>
 
                             <div>
-                                <label className="block text-sm text-gray-400 mb-1">Difficulty</label>
+                                <label className="block text-sm text-secondary mb-1">Difficulty</label>
                                 <select 
                                     value={scenarioConfig.difficulty}
                                     onChange={(e) => setScenarioConfig({...scenarioConfig, difficulty: e.target.value})}
-                                    className="w-full bg-gray-900 border border-gray-700 rounded p-2"
+                                    className="w-full bg-background border border-border rounded p-2"
                                 >
                                     <option value="easy">Easy</option>
                                     <option value="medium">Medium</option>
@@ -916,17 +916,17 @@ const NetworkBuilder = () => {
                             </div>
 
                             <div>
-                                <label className="block text-sm text-gray-400 mb-1">Objective / Description</label>
+                                <label className="block text-sm text-secondary mb-1">Objective / Description</label>
                                 <textarea 
                                     value={scenarioConfig.objective}
                                     onChange={(e) => setScenarioConfig({...scenarioConfig, objective: e.target.value})}
-                                    className="w-full bg-gray-900 border border-gray-700 rounded p-2 h-32"
+                                    className="w-full bg-background border border-border rounded p-2 h-32"
                                 />
                             </div>
                         </div>
 
                         <div className="flex justify-end mt-6">
-                            <button onClick={() => setShowScenarioSettings(false)} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded">
+                            <button onClick={() => setShowScenarioSettings(false)} className="bg-accent hover:bg-accentHover text-primary px-4 py-2 rounded">
                                 Save Configuration
                             </button>
                         </div>
@@ -935,29 +935,29 @@ const NetworkBuilder = () => {
             )}
 
             {selectedNode && (
-                <div className="w-80 bg-gray-900 border-l border-gray-700 p-4 overflow-y-auto z-10 shadow-xl">
+                <div className="w-80 bg-background border-l border-border p-4 overflow-y-auto z-10 shadow-xl">
                     <div className="flex justify-between items-center mb-4">
-                        <h3 className="text-lg font-semibold text-white">Configuration</h3>
-                        <button onClick={() => setSelectedNode(null)} className="text-gray-400 hover:text-white text-xl">&times;</button>
+                        <h3 className="text-lg font-semibold text-primary">Configuration</h3>
+                        <button onClick={() => setSelectedNode(null)} className="text-secondary hover:text-primary text-xl">&times;</button>
                     </div>
                     
                     <div className="space-y-4">
                         <div>
-                            <label className="block text-sm text-gray-400 mb-1">Node Name</label>
+                            <label className="block text-sm text-secondary mb-1">Node Name</label>
                             <input 
                                 type="text" 
                                 value={selectedNode.data.label} 
                                 onChange={(e) => updateNodeData('label', e.target.value)}
-                                className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white focus:border-blue-500 outline-none"
+                                className="w-full bg-surface border border-border rounded p-2 text-primary focus:border-blue-500 outline-none"
                             />
                         </div>
                         
                         <div>
-                            <label className="block text-sm text-gray-400 mb-1">OS Image</label>
+                            <label className="block text-sm text-secondary mb-1">OS Image</label>
                             <select 
                                 value={selectedNode.data.image} 
                                 onChange={(e) => updateNodeData('image', e.target.value)}
-                                className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white focus:border-blue-500 outline-none"
+                                className="w-full bg-surface border border-border rounded p-2 text-primary focus:border-blue-500 outline-none"
                             >
                                 <option value="ubuntu-20.04">Ubuntu 20.04 LTS</option>
                                 <option value="kali-linux">Kali Linux</option>
@@ -971,41 +971,41 @@ const NetworkBuilder = () => {
 
                         <div className="grid grid-cols-2 gap-2">
                             <div>
-                                <label className="block text-sm text-gray-400 mb-1">CPU Cores</label>
+                                <label className="block text-sm text-secondary mb-1">CPU Cores</label>
                                 <input 
                                     type="number" 
                                     value={selectedNode.data.cpu} 
                                     onChange={(e) => updateNodeData('cpu', parseInt(e.target.value))}
-                                    className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white focus:border-blue-500 outline-none"
+                                    className="w-full bg-surface border border-border rounded p-2 text-primary focus:border-blue-500 outline-none"
                                 />
                             </div>
                             <div>
-                                <label className="block text-sm text-gray-400 mb-1">RAM (MB)</label>
+                                <label className="block text-sm text-secondary mb-1">RAM (MB)</label>
                                 <input 
                                     type="number" 
                                     value={selectedNode.data.ram} 
                                     onChange={(e) => updateNodeData('ram', parseInt(e.target.value))}
-                                    className="w-full bg-gray-800 border border-gray-700 rounded p-2 text-white focus:border-blue-500 outline-none"
+                                    className="w-full bg-surface border border-border rounded p-2 text-primary focus:border-blue-500 outline-none"
                                 />
                             </div>
                         </div>
 
-                        <div className="border-t border-gray-700 pt-4">
+                        <div className="border-t border-border pt-4">
                             <div className="flex justify-between items-center mb-2">
-                                <label className="block text-sm text-gray-400">Assets & Scripts</label>
-                                <button onClick={addAsset} className="text-xs bg-blue-600 px-2 py-1 rounded text-white hover:bg-blue-500 flex items-center gap-1">
+                                <label className="block text-sm text-secondary">Assets & Scripts</label>
+                                <button onClick={addAsset} className="text-xs bg-accent px-2 py-1 rounded text-primary hover:bg-blue-500 flex items-center gap-1">
                                     <Plus size={12} /> Add
                                 </button>
                             </div>
                             
                             <div className="space-y-2">
                                 {selectedNode.data.assets && selectedNode.data.assets.map((asset, idx) => (
-                                    <div key={idx} className="bg-gray-800 p-2 rounded border border-gray-700">
+                                    <div key={idx} className="bg-surface p-2 rounded border border-border">
                                         <div className="flex gap-2 mb-2">
                                             <select 
                                                 value={asset.type}
                                                 onChange={(e) => updateAsset(idx, 'type', e.target.value)}
-                                                className="bg-gray-700 text-xs rounded p-1 text-white border border-gray-600"
+                                                className="bg-surfaceHover text-xs rounded p-1 text-primary border border-border"
                                             >
                                                 <option value="package">Install Package</option>
                                                 <option value="command">Run Command</option>
@@ -1019,12 +1019,12 @@ const NetworkBuilder = () => {
                                             value={asset.value}
                                             onChange={(e) => updateAsset(idx, 'value', e.target.value)}
                                             placeholder={asset.type === 'package' ? 'e.g. nginx' : 'e.g. systemctl start nginx'}
-                                            className="w-full bg-gray-700 border border-gray-600 rounded p-1 text-sm text-white focus:border-blue-500 outline-none"
+                                            className="w-full bg-surfaceHover border border-border rounded p-1 text-sm text-primary focus:border-blue-500 outline-none"
                                         />
                                     </div>
                                 ))}
                                 {(!selectedNode.data.assets || selectedNode.data.assets.length === 0) && (
-                                    <div className="text-xs text-gray-500 italic text-center py-2">No assets defined</div>
+                                    <div className="text-xs text-secondary italic text-center py-2">No assets defined</div>
                                 )}
                             </div>
                         </div>

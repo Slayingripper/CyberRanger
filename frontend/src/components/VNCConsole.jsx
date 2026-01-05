@@ -47,7 +47,7 @@ export default function VNCConsole({ host, port, vmName, onClose }) {
 
   return (
     <div className="fixed inset-0 z-50 bg-black flex flex-col">
-      <div className="bg-gray-800 text-white p-3 flex justify-between items-center border-b border-gray-700">
+      <div className="bg-surface text-primary p-3 flex justify-between items-center border-b border-border">
         <div className="flex items-center gap-4">
             <h2 className="font-bold text-lg">Console: {vmName}</h2>
             <span className={`text-xs px-2 py-1 rounded ${status === 'Connected' ? 'bg-green-900 text-green-300' : 'bg-yellow-900 text-yellow-300'}`}>
@@ -57,7 +57,7 @@ export default function VNCConsole({ host, port, vmName, onClose }) {
         <div className="flex gap-2">
             <button 
                 onClick={() => rfbRef.current?.sendCtrlAltDel()} 
-                className="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded text-sm"
+                className="bg-surfaceHover hover:bg-border px-3 py-1 rounded text-sm"
             >
                 Send Ctrl-Alt-Del
             </button>
@@ -69,8 +69,15 @@ export default function VNCConsole({ host, port, vmName, onClose }) {
             </button>
         </div>
       </div>
-      <div className="flex-1 overflow-hidden bg-gray-900 relative" ref={screenRef}>
-        {/* Canvas injected here */}
+            <div className="flex-1 overflow-hidden bg-background relative" ref={screenRef}>
+        {status !== 'Connected' && (
+          <div className="absolute inset-0 flex items-center justify-center text-secondary">
+            <div className="text-center">
+              <p className="mb-2">{status}</p>
+              {status === 'Connecting...' && <div className="animate-spin h-8 w-8 border-4 border-accent border-t-transparent rounded-full mx-auto"></div>}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

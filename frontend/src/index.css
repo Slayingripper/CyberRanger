@@ -1,3 +1,55 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-background text-primary;
+  }
+
+  :root {
+    /* Default Dark Theme */
+    --bg-primary: #111827; /* gray-900 */
+    --bg-secondary: #1f2937; /* gray-800 */
+    --bg-tertiary: #374151; /* gray-700 */
+    --text-primary: #f9fafb; /* gray-50 */
+    --text-secondary: #9ca3af; /* gray-400 */
+    --accent-primary: #2563eb; /* blue-600 */
+    --accent-hover: #1d4ed8; /* blue-700 */
+    --border-color: #374151; /* gray-700 */
+  }
+
+  .theme-light {
+    --bg-primary: #f3f4f6; /* gray-100 */
+    --bg-secondary: #ffffff; /* white */
+    --bg-tertiary: #e5e7eb; /* gray-200 */
+    --text-primary: #111827; /* gray-900 */
+    --text-secondary: #4b5563; /* gray-600 */
+    --accent-primary: #2563eb; /* blue-600 */
+    --accent-hover: #1d4ed8; /* blue-700 */
+    --border-color: #e5e7eb; /* gray-200 */
+  }
+
+  .theme-cyberpunk {
+    --bg-primary: #050505;
+    --bg-secondary: #121212;
+    --bg-tertiary: #2a2a2a;
+    --text-primary: #fce94f; /* Neon Yellow */
+    --text-secondary: #00ff9d; /* Neon Green */
+    --accent-primary: #ff0055; /* Neon Pink */
+    --accent-hover: #d40046;
+    --border-color: #00ff9d;
+  }
+
+  .theme-matrix {
+    --bg-primary: #000000;
+    --bg-secondary: #0a0a0a;
+    --bg-tertiary: #111111;
+    --text-primary: #00ff00;
+    --text-secondary: #008f11;
+    --accent-primary: #003b00;
+    --accent-hover: #005500;
+    --border-color: #00ff00;
+  }
+}
+
