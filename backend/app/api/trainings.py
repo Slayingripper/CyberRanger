@@ -6,6 +6,8 @@ import yaml
 import os
 import uuid
 from app.core.vm_manager import WORK_DIR, vm_manager
+from app.core.event_bus import event_bus
+import time
 
 router = APIRouter()
 
@@ -129,9 +131,16 @@ async def deploy_level(training_id: str, level_idx: int):
                 network_name="default"
             )
             results.append({"name": name, "status": "created", "details": res})
+            try:
+                # Start console streaming to EventBus for runs associated with this training/level
+                vm_manager.start_console_stream(name, training_id, level_idx)
+            except Exception:
+                pass
         except Exception as e:
             results.append({"name": name, "status": "error", "error": str(e)})
-        
+    # publish event to any matching runs
+    await event_bus.publish_by_definition_level(training_id, level_idx, {"type": "deploy", "ts": time.time(), "result": results})
+
     return {"status": "deployed", "vms": results}
 
 @router.post("/trainings/{training_id}/levels/{level_idx}/destroy")
@@ -167,9 +176,13 @@ async def destroy_level(training_id: str, level_idx: int):
                     dom.destroy()
                 dom.undefine()
                 results.append(name)
+                try:
+                    vm_manager.stop_console_stream(name)
+                except Exception:
+                    pass
         except Exception:
             pass
-            
+    await event_bus.publish_by_definition_level(training_id, level_idx, {"type": "destroy", "ts": time.time(), "result": results})
     return {"status": "destroyed", "vms": results}
 
 @router.get("/trainings/{training_id}/levels/{level_idx}/status")
@@ -233,3 +246,16 @@ async def upload_training(file: UploadFile = File(...)):
         return training
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid file format or schema: {str(e)}")
+
+
+@router.post("/debug/trainings/{training_id}/levels/{level_idx}/console")
+async def debug_console_event(training_id: str, level_idx: int, payload: Dict[str, Any]):
+    """Debug helper: inject a console event for a training/level to exercise the event bus."""
+    msg = payload.get("msg") if isinstance(payload, dict) else None
+    if not msg:
+        raise HTTPException(status_code=400, detail="msg required")
+    try:
+        await event_bus.publish_by_definition_level(training_id, level_idx, {"type": "console", "vm": "debug", "msg": msg, "ts": time.time()})
+        return {"status": "ok"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

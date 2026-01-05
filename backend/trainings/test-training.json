@@ -1,0 +1,1 @@
+{"id": "test-training", "title": "Test Training", "description": "A sample", "difficulty": "easy", "levels": [{"id": "lvl1", "title": "Level 1", "description": "Desc", "tasks": [{"id": "t1", "question": "What is 2+2?", "type": "quiz", "answer": "4"}]}]}

@@ -1,0 +1,19 @@
+{
+  "id": "246002ef-6f37-45fa-b083-948999b19803",
+  "definition_id": "example-scenario",
+  "participants": [],
+  "current_level": 0,
+  "state": "running",
+  "level_states": [
+    {
+      "index": 0,
+      "status": "in_progress",
+      "started_at": 1767619554.013673,
+      "ended_at": null,
+      "score": 0,
+      "hints": [],
+      "sandbox": null
+    }
+  ],
+  "created_at": 1767619554.0136616
+}

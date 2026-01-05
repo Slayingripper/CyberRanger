@@ -19,6 +19,17 @@
     --border-color: #374151; /* gray-700 */
   }
 
+  .theme-dark {
+    --bg-primary: #111827; /* gray-900 */
+    --bg-secondary: #1f2937; /* gray-800 */
+    --bg-tertiary: #374151; /* gray-700 */
+    --text-primary: #f9fafb; /* gray-50 */
+    --text-secondary: #9ca3af; /* gray-400 */
+    --accent-primary: #2563eb; /* blue-600 */
+    --accent-hover: #1d4ed8; /* blue-700 */
+    --border-color: #374151; /* gray-700 */
+  }
+
   .theme-light {
     --bg-primary: #f3f4f6; /* gray-100 */
     --bg-secondary: #ffffff; /* white */

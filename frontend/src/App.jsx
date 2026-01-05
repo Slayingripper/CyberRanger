@@ -6,6 +6,7 @@ import VNCConsole from './components/VNCConsole';
 import NetworkBuilder from './components/NetworkBuilder';
 import Settings from './components/Settings';
 import Training from './components/Training';
+import Modal from './components/Modal';
 import { ThemeProvider } from './context/ThemeContext';
 
 const API_URL = 'http://localhost:8001/api';
@@ -16,6 +17,7 @@ function AppContent() {
   const [loading, setLoading] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [activeConsole, setActiveConsole] = useState(null);
+  const [deleteConfirm, setDeleteConfirm] = useState({ isOpen: false, vmName: null });
 
   useEffect(() => {
     fetchVMs();
@@ -40,11 +42,15 @@ function AppContent() {
     fetchVMs();
   };
 
-  const handleDeleteVM = async (name) => {
-    if(confirm(`Are you sure you want to delete ${name}?`)) {
-        await axios.delete(`${API_URL}/vms/${name}`);
-        fetchVMs();
-    }
+  const handleDeleteVM = (name) => {
+    setDeleteConfirm({ isOpen: true, vmName: name });
+  };
+
+  const executeDeleteVM = async () => {
+    if (!deleteConfirm.vmName) return;
+    await axios.delete(`${API_URL}/vms/${deleteConfirm.vmName}`);
+    fetchVMs();
+    setDeleteConfirm({ isOpen: false, vmName: null });
   };
 
   return (
@@ -101,6 +107,20 @@ function AppContent() {
             onClose={() => setActiveConsole(null)} 
         />
       )}
+
+      <Modal
+        isOpen={deleteConfirm.isOpen}
+        onClose={() => setDeleteConfirm({ isOpen: false, vmName: null })}
+        title="Delete Virtual Machine"
+        footer={
+            <>
+                <button onClick={() => setDeleteConfirm({ isOpen: false, vmName: null })} className="px-4 py-2 text-secondary hover:text-primary">Cancel</button>
+                <button onClick={executeDeleteVM} className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded">Delete</button>
+            </>
+        }
+      >
+        <p className="text-secondary">Are you sure you want to delete <span className="font-bold text-primary">{deleteConfirm.vmName}</span>? This action cannot be undone.</p>
+      </Modal>
     </div>
   );
 }
@@ -210,6 +230,7 @@ function CreateVMModal({ onClose, onCreated }) {
   const [images, setImages] = useState([]);
   const [selectedImage, setSelectedImage] = useState('');
   const [creating, setCreating] = useState(false);
+  const [messageModal, setMessageModal] = useState({ isOpen: false, title: '', message: '', type: 'info' });
   
   // Cloud Init State
   const [enableCloudInit, setEnableCloudInit] = useState(false);
@@ -245,17 +266,28 @@ function CreateVMModal({ onClose, onCreated }) {
       await axios.post(`${API_URL}/vms`, payload);
       onCreated();
     } catch (e) {
-      alert('Failed to create VM: ' + (e.response?.data?.detail || e.message));
+      setMessageModal({ isOpen: true, title: 'Error', message: 'Failed to create VM: ' + (e.response?.data?.detail || e.message), type: 'error' });
     } finally {
       setCreating(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 overflow-y-auto py-10">
-      <div className="bg-surface p-6 rounded-xl border border-border w-full max-w-md my-auto">
-        <h2 className="text-xl font-bold mb-4 text-primary">Create New VM</h2>
-        <form onSubmit={handleSubmit} className="space-y-4">
+    <>
+    <Modal
+      isOpen={true}
+      onClose={onClose}
+      title="Create New VM"
+      footer={
+        <>
+            <button type="button" onClick={onClose} className="px-4 py-2 text-secondary hover:text-primary">Cancel</button>
+            <button form="create-vm-form" type="submit" disabled={creating} className="px-4 py-2 bg-accent hover:bg-accentHover text-primary rounded">
+              {creating ? 'Creating...' : 'Create VM'}
+            </button>
+        </>
+      }
+    >
+        <form id="create-vm-form" onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label className="block text-sm text-secondary mb-1">VM Name</label>
             <input type="text" value={name} onChange={e => setName(e.target.value)} className="w-full bg-background border border-border rounded p-2 text-primary" required />
@@ -315,16 +347,22 @@ function CreateVMModal({ onClose, onCreated }) {
               </div>
             )}
           </div>
-
-          <div className="flex justify-end space-x-2 mt-6">
-            <button type="button" onClick={onClose} className="px-4 py-2 text-secondary hover:text-primary">Cancel</button>
-            <button type="submit" disabled={creating} className="px-4 py-2 bg-accent hover:bg-accentHover text-primary rounded">
-              {creating ? 'Creating...' : 'Create VM'}
-            </button>
-          </div>
         </form>
-      </div>
-    </div>
+    </Modal>
+
+    <Modal
+        isOpen={messageModal.isOpen}
+        onClose={() => setMessageModal({ ...messageModal, isOpen: false })}
+        title={messageModal.title}
+        footer={
+            <button onClick={() => setMessageModal({ ...messageModal, isOpen: false })} className="px-4 py-2 bg-surface hover:bg-surfaceHover text-primary rounded">Close</button>
+        }
+    >
+        <div className={`text-sm ${messageModal.type === 'error' ? 'text-red-400' : messageModal.type === 'success' ? 'text-green-400' : 'text-secondary'}`}>
+            {messageModal.message}
+        </div>
+    </Modal>
+    </>
   );
 }
 

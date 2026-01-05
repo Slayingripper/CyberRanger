@@ -1,0 +1,19 @@
+{
+  "id": "edfa1ee3-4d96-4f02-993f-7d9f88d36249",
+  "definition_id": "ws-training",
+  "participants": [],
+  "current_level": 0,
+  "state": "running",
+  "level_states": [
+    {
+      "index": 0,
+      "status": "in_progress",
+      "started_at": 1767615154.9399517,
+      "ended_at": null,
+      "score": 0,
+      "hints": [],
+      "sandbox": null
+    }
+  ],
+  "created_at": 1767615154.939938
+}

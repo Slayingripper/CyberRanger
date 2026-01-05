@@ -14,8 +14,15 @@ export function ThemeProvider({ children }) {
       }
     }
   }, []);
+  // Keep the document root in sync so CSS variables apply everywhere (body, :root, etc.)
+  useEffect(() => {
+    // Remove any existing theme- classes then add the current one
+    document.documentElement.classList.remove('theme-dark', 'theme-light', 'theme-cyberpunk', 'theme-matrix');
+    document.documentElement.classList.add(`theme-${theme}`);
+  }, [theme]);
 
   const changeTheme = (newTheme) => {
+    console.log('Theme change requested:', newTheme);
     setTheme(newTheme);
     // Update localStorage
     const savedSettings = localStorage.getItem('appSettings');

@@ -6,6 +6,9 @@ import json
 import ipaddress
 import xml.etree.ElementTree as ET
 from typing import List, Dict, Optional, Any
+import threading
+import time
+from app.core.event_bus import event_bus
 
 # Determine working directory
 if os.path.exists("/app"):
@@ -50,6 +53,7 @@ class VMManager:
         self.uri = uri
         self.conn = None
         self.proxies: Dict[str, Dict[str, Any]] = {}
+        self.console_threads: Dict[str, Dict[str, Any]] = {}
 
     def connect(self) -> bool:
         try:
@@ -361,10 +365,93 @@ runcmd:
             dom = self.conn.defineXML(xml)
             if dom:
                 dom.create()
+                # Try to start console streaming in background if possible
+                try:
+                    # No definition context here; caller may start stream by calling start_console_stream
+                    pass
+                except Exception:
+                    pass
                 return {"status": "success", "uuid": dom.UUIDString()}
         except libvirt.libvirtError as e:
             return {"status": "error", "message": str(e)}
         return {"status": "error", "message": "Unknown error"}
+
+    def start_console_stream(self, vm_name: str, definition_id: str, level_idx: int):
+        """Start background thread that reads the domain's console and publishes events via event_bus."""
+        if vm_name in self.console_threads:
+            return
+
+        try:
+            if not self.conn:
+                self.connect()
+            dom = self.conn.lookupByName(vm_name)
+            stream = self.conn.newStream(0)
+            try:
+                dom.openConsole(None, stream, 0)
+            except libvirt.libvirtError:
+                # No console available
+                try:
+                    stream.finish()
+                except Exception:
+                    pass
+                return
+
+            stop_event = threading.Event()
+
+            def _reader():
+                try:
+                    while not stop_event.is_set():
+                        try:
+                            data = stream.recv(4096)
+                            if not data:
+                                time.sleep(0.1)
+                                continue
+                            try:
+                                txt = data.decode('utf-8', errors='replace')
+                            except Exception:
+                                txt = repr(data)
+                            # publish to any runs matching this definition and level
+                            asyncio_loop = None
+                            try:
+                                import asyncio
+                                asyncio_loop = asyncio.new_event_loop()
+                                asyncio.set_event_loop(asyncio_loop)
+                                asyncio_loop.run_until_complete(event_bus.publish_by_definition_level(definition_id, level_idx, {"type": "console", "vm": vm_name, "msg": txt, "ts": time.time()}))
+                            finally:
+                                if asyncio_loop:
+                                    try:
+                                        asyncio_loop.close()
+                                    except Exception:
+                                        pass
+                        except libvirt.libvirtError:
+                            break
+                        except Exception:
+                            time.sleep(0.1)
+                finally:
+                    try:
+                        stream.finish()
+                    except Exception:
+                        pass
+
+            t = threading.Thread(target=_reader, name=f"console-{vm_name}", daemon=True)
+            self.console_threads[vm_name] = {"thread": t, "stop": stop_event}
+            t.start()
+        except Exception:
+            return
+
+    def stop_console_stream(self, vm_name: str):
+        info = self.console_threads.get(vm_name)
+        if not info:
+            return
+        try:
+            info['stop'].set()
+            info['thread'].join(timeout=1.0)
+        except Exception:
+            pass
+        try:
+            del self.console_threads[vm_name]
+        except Exception:
+            pass
 
     def ensure_network(self, name: str, bridge_name: str, gateway_ip: str, dhcp: bool = True, nat: bool = True) -> bool:
         if not self.conn:

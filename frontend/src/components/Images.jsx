@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { Upload, Download, File, HardDrive } from 'lucide-react';
+import Modal from './Modal';
 
 const API_URL = 'http://localhost:8001/api';
 
@@ -10,6 +11,7 @@ export default function Images() {
   const [downloadUrl, setDownloadUrl] = useState('');
   const [downloadName, setDownloadName] = useState('');
   const [activeDownloads, setActiveDownloads] = useState({});
+  const [messageModal, setMessageModal] = useState({ isOpen: false, title: '', message: '', type: 'info' });
 
   useEffect(() => {
     fetchImages();
@@ -73,7 +75,7 @@ export default function Images() {
       });
       fetchImages();
     } catch (e) {
-      alert('Upload failed');
+      setMessageModal({ isOpen: true, title: 'Error', message: 'Upload failed', type: 'error' });
     } finally {
       setUploadProgress(null);
     }
@@ -94,7 +96,7 @@ export default function Images() {
       setDownloadUrl('');
       setDownloadName('');
     } catch (e) {
-      alert('Download request failed');
+      setMessageModal({ isOpen: true, title: 'Error', message: 'Download request failed', type: 'error' });
     }
   };
 
@@ -267,6 +269,19 @@ export default function Images() {
           </tbody>
         </table>
       </div>
+
+      <Modal
+        isOpen={messageModal.isOpen}
+        onClose={() => setMessageModal({ ...messageModal, isOpen: false })}
+        title={messageModal.title}
+        footer={
+            <button onClick={() => setMessageModal({ ...messageModal, isOpen: false })} className="px-4 py-2 bg-surface hover:bg-surfaceHover text-primary rounded">Close</button>
+        }
+      >
+        <div className={`text-sm ${messageModal.type === 'error' ? 'text-red-400' : messageModal.type === 'success' ? 'text-green-400' : 'text-secondary'}`}>
+            {messageModal.message}
+        </div>
+      </Modal>
     </div>
   );
 }

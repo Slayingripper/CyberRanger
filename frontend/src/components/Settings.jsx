@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { Save, RefreshCw, Trash2, Moon, Sun, Zap, Terminal } from 'lucide-react';
 import { useTheme } from '../context/ThemeContext';
+import Modal from './Modal';
 
 function Settings() {
   const { theme, changeTheme } = useTheme();
+  const [resetConfirm, setResetConfirm] = useState(false);
   const [settings, setSettings] = useState({
     defaultCpu: 2,
     defaultRam: 2048,
@@ -31,19 +33,22 @@ function Settings() {
   };
 
   const handleReset = () => {
-    if (confirm('Are you sure you want to reset all settings to default?')) {
-      const defaults = {
-        defaultCpu: 2,
-        defaultRam: 2048,
-        theme: 'dark',
-        autoRefreshInterval: 5000,
-        defaultDiskSize: 20,
-        showHints: true,
-      };
-      setSettings(defaults);
-      changeTheme('dark');
-      localStorage.setItem('appSettings', JSON.stringify(defaults));
-    }
+    setResetConfirm(true);
+  };
+
+  const executeReset = () => {
+    const defaults = {
+      defaultCpu: 2,
+      defaultRam: 2048,
+      theme: 'dark',
+      autoRefreshInterval: 5000,
+      defaultDiskSize: 20,
+      showHints: true,
+    };
+    setSettings(defaults);
+    changeTheme('dark');
+    localStorage.setItem('appSettings', JSON.stringify(defaults));
+    setResetConfirm(false);
   };
 
   return (
@@ -161,6 +166,20 @@ function Settings() {
           <RefreshCw size={16} className="mr-2" /> Reset Settings
         </button>
       </div>
+
+      <Modal
+        isOpen={resetConfirm}
+        onClose={() => setResetConfirm(false)}
+        title="Reset Settings"
+        footer={
+            <>
+                <button onClick={() => setResetConfirm(false)} className="px-4 py-2 text-secondary hover:text-primary">Cancel</button>
+                <button onClick={executeReset} className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded">Reset</button>
+            </>
+        }
+      >
+        <p className="text-secondary">Are you sure you want to reset all settings to default?</p>
+      </Modal>
     </div>
   );
 }

@@ -1,0 +1,19 @@
+{
+  "id": "74ec980f-e8ef-43d3-8c22-aa3dcd607166",
+  "definition_id": "test-training",
+  "participants": [],
+  "current_level": 0,
+  "state": "completed",
+  "level_states": [
+    {
+      "index": 0,
+      "status": "completed",
+      "started_at": 1767617464.7395396,
+      "ended_at": 1767617464.741338,
+      "score": 100,
+      "hints": [],
+      "sandbox": null
+    }
+  ],
+  "created_at": 1767617464.739529
+}
