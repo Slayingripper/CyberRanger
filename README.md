@@ -2,6 +2,8 @@
 
 A lightweight, scalable Cyber Range platform using QEMU/KVM and a modern web interface.
 
+> **📚 [Complete Documentation Available in the Wiki](docs/wiki/Home.md)**
+
 ## Features
 - **Backend**: Python FastAPI with Libvirt integration.
 - **Frontend**: React + Vite with Tailwind CSS.
@@ -40,6 +42,20 @@ A lightweight, scalable Cyber Range platform using QEMU/KVM and a modern web int
    - `OPENWRT_IMAGE_URL` (e.g. OpenWrt x86_64 `*.img.gz`)
    - `OPENWRT_IMAGE_FILENAME` (download filename)
    - `OPENWRT_IMAGE_OUTPUT` (extracted image name, default `openwrt.img`)
+
+## Documentation
+
+Comprehensive documentation is available in the [Wiki](docs/wiki/):
+
+- **[📖 Wiki Home](docs/wiki/Home.md)** - Introduction and overview
+- **[🚀 Installation & Setup](docs/wiki/Installation-and-Setup.md)** - Detailed installation guide
+- **[📚 User Guide](docs/wiki/User-Guide.md)** - Complete user documentation
+- **[🏗️ Architecture](docs/wiki/Architecture.md)** - Technical architecture details
+- **[🔌 API Reference](docs/wiki/API-Reference.md)** - REST API documentation
+- **[🎓 Training System](docs/wiki/Training-System.md)** - Creating training courses
+- **[🌐 Topology Builder](docs/wiki/Topology-Builder.md)** - Network scenario design
+- **[🔧 Troubleshooting](docs/wiki/Troubleshooting.md)** - Common issues and solutions
+- **[🤝 Contributing](docs/wiki/Contributing.md)** - Contribution guidelines
 
 ## Troubleshooting
 - **Permission Denied**: If the backend cannot connect to libvirt, ensure the socket permissions are correct or run docker-compose with `sudo`.
