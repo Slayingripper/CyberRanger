@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Terminal, Play, Square, Plus, Monitor, Settings as SettingsIcon, Network, HardDrive, BookOpen } from 'lucide-react';
 import axios from 'axios';
+import { getApiUrl } from './lib/api';
 import Images from './components/Images';
 import VNCConsole from './components/VNCConsole';
 import NetworkBuilder from './components/NetworkBuilder';
@@ -9,7 +10,7 @@ import Training from './components/Training';
 import Modal from './components/Modal';
 import { ThemeProvider } from './context/ThemeContext';
 
-const API_URL = 'http://localhost:8001/api';
+const API_URL = getApiUrl();
 
 function AppContent() {
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -85,7 +86,7 @@ function AppContent() {
               onDelete={handleDeleteVM}
               onRefresh={fetchVMs}
               onCreate={() => setShowCreateModal(true)}
-              onOpenConsole={(vm) => setActiveConsole({ host: 'localhost', port: vm.websocket_port, name: vm.name })}
+              onOpenConsole={(vm) => setActiveConsole({ host: 'localhost', port: vm.vnc_port, name: vm.name })}
             />
           )}
           {activeTab === 'images' && <Images />}
@@ -202,7 +203,7 @@ function Dashboard({ vms, onStart, onStop, onDelete, onRefresh, onCreate, onOpen
               </button>
             </div>
             
-            {vm.state === 1 && vm.websocket_port && (
+            {vm.state === 1 && vm.vnc_port && (
                <button 
                  onClick={() => onOpenConsole(vm)}
                  className="mt-3 block w-full text-center bg-accent/30 hover:bg-accent/50 text-accent py-2 rounded border border-accent"

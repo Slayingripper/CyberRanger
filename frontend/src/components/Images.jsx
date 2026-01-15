@@ -2,8 +2,9 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { Upload, Download, File, HardDrive } from 'lucide-react';
 import Modal from './Modal';
+import { getApiUrl } from '../lib/api';
 
-const API_URL = 'http://localhost:8001/api';
+const API_URL = getApiUrl();
 
 export default function Images() {
   const [images, setImages] = useState([]);

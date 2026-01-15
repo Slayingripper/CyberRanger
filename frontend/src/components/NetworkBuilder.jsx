@@ -13,6 +13,7 @@ import yaml from 'js-yaml';
 import axios from 'axios';
 import CustomNode from './CustomNode';
 import Modal from './Modal';
+import { getApiUrl } from '../lib/api';
 
 const initialNodes = [
   {
@@ -193,7 +194,7 @@ const PREDEFINED_TOPOLOGIES = {
 let id = 0;
 const getId = () => `dndnode_${id++}`;
 
-const API_URL = 'http://localhost:8001/api';
+const API_URL = getApiUrl();
 
 const SCENARIO_DEFAULTS = {
     name: 'New Scenario',
@@ -205,6 +206,7 @@ const SCENARIO_DEFAULTS = {
 
 const NetworkBuilder = () => {
   const reactFlowWrapper = useRef(null);
+    const cacheTimerRef = useRef(null);
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [reactFlowInstance, setReactFlowInstance] = useState(null);
@@ -212,6 +214,10 @@ const NetworkBuilder = () => {
   const [availableImages, setAvailableImages] = useState([]);
     const [runtimeVms, setRuntimeVms] = useState([]);
     const [viewportRestored, setViewportRestored] = useState(false);
+        const [scanTarget, setScanTarget] = useState('192.168.1.0/24');
+        const [scanBusy, setScanBusy] = useState(false);
+        const [scanDryRun, setScanDryRun] = useState(false);
+        const [importBusy, setImportBusy] = useState(false);
   
   // Scenario State
   const [scenarioConfig, setScenarioConfig] = useState({
@@ -274,10 +280,28 @@ const NetworkBuilder = () => {
               if (Array.isArray(savedNodes)) setNodes(savedNodes);
               if (Array.isArray(savedEdges)) setEdges(savedEdges);
               if (savedScenario) setScenarioConfig(savedScenario);
+              return;
           } catch (err) {
               console.error('Failed to load saved topology', err);
           }
       }
+
+      // Fallback to backend cache if local storage is empty/invalid
+      (async () => {
+          try {
+              const res = await axios.get(`${API_URL}/topology/cache`);
+              const topo = res.data?.topology;
+              if (topo?.nodes || topo?.edges) {
+                  const savedNodes = topo.nodes || [];
+                  const savedEdges = topo.edges || [];
+                  if (Array.isArray(savedNodes)) setNodes(savedNodes);
+                  if (Array.isArray(savedEdges)) setEdges(savedEdges);
+                  if (topo.scenario) setScenarioConfig(topo.scenario);
+              }
+          } catch (err) {
+              // Ignore if no cached topology exists
+          }
+      })();
   }, []);
 
   // Restore viewport when ReactFlow instance is ready
@@ -316,14 +340,22 @@ const NetworkBuilder = () => {
 
   // Save topology when it changes
   useEffect(() => {
-      const saveTopology = () => {
-          if (nodes.length > 0 || edges.length > 0) {
-              const viewport = reactFlowInstance ? reactFlowInstance.getViewport() : null;
-              const topology = { nodes, edges, scenario: scenarioConfig, viewport };
-              localStorage.setItem('networkTopology', JSON.stringify(topology));
+      if (nodes.length > 0 || edges.length > 0) {
+          const viewport = reactFlowInstance ? reactFlowInstance.getViewport() : null;
+          const topology = { nodes, edges, scenario: scenarioConfig, viewport };
+          localStorage.setItem('networkTopology', JSON.stringify(topology));
+
+          if (cacheTimerRef.current) {
+              clearTimeout(cacheTimerRef.current);
           }
-      };
-      saveTopology();
+          cacheTimerRef.current = setTimeout(async () => {
+              try {
+                  await axios.post(`${API_URL}/topology/cache`, topology);
+              } catch (err) {
+                  // Best-effort cache; ignore failures
+              }
+          }, 750);
+      }
   }, [nodes, edges, scenarioConfig, reactFlowInstance]);
 
   // Save viewport on page unload/visibility change
@@ -365,6 +397,115 @@ const NetworkBuilder = () => {
       const timer = setInterval(fetchImages, 10000); // Refresh every 10 seconds
       return () => clearInterval(timer);
   }, []);
+
+  const scanAndImport = async () => {
+      if (!scanTarget || scanBusy) return;
+      setScanBusy(true);
+      try {
+          const res = await axios.post(`${API_URL}/range-mapper/scan`, {
+              target: scanTarget,
+              scenario_name: 'Imported Network',
+              dry_run: !!scanDryRun,
+          });
+
+          if (res.data?.dry_run) {
+              setMessageModal({
+                  isOpen: true,
+                  title: 'Dry Run',
+                  message: `Would scan ${res.data.target} (see console for commands).`,
+                  type: 'info'
+              });
+              console.log('Range mapper dry run:', res.data);
+              return;
+          }
+
+          const topo = res.data?.topology;
+          if (!topo?.nodes) throw new Error('No topology returned');
+
+          const newNodes = topo.nodes.map(n => ({
+              id: n.id,
+              type: 'custom',
+              position: n.position || { x: 100, y: 100 },
+              data: {
+                  label: n.label || 'VM',
+                  image: n.config?.image || 'ubuntu-20.04',
+                  cpu: n.config?.cpu || 1,
+                  ram: n.config?.ram || 1024,
+                  assets: n.config?.assets || [],
+                  automation: n.config?.automation || null,
+                  meta: n.meta || null,
+              }
+          }));
+          setNodes(newNodes);
+
+          const newEdges = (topo.edges || []).map((e, idx) => ({
+              id: e.id || `e${idx}`,
+              source: e.source,
+              target: e.target
+          }));
+          setEdges(newEdges);
+
+          if (topo.scenario) {
+              setScenarioConfig({ ...SCENARIO_DEFAULTS, ...(topo.scenario || {}) });
+          }
+
+          setMessageModal({ isOpen: true, title: 'Imported', message: `Imported ${newNodes.length} nodes from scan.`, type: 'success' });
+      } catch (err) {
+          console.error(err);
+          const msg = err?.response?.data?.detail || err.message || 'Scan failed';
+          setMessageModal({ isOpen: true, title: 'Scan Error', message: msg, type: 'error' });
+      } finally {
+          setScanBusy(false);
+      }
+  };
+
+  const importXmlAndConvert = async (file) => {
+      if (!file || importBusy) return;
+      setImportBusy(true);
+      try {
+          const form = new FormData();
+          form.append('file', file);
+          // scenario_name/network_prefix as query params
+          const res = await axios.post(`${API_URL}/range-mapper/import-xml`, form, {
+              headers: { 'Content-Type': 'multipart/form-data' },
+              params: { scenario_name: 'Imported Network' }
+          });
+          const topo = res.data?.topology;
+          if (!topo?.nodes) throw new Error('No topology returned');
+
+          const newNodes = topo.nodes.map(n => ({
+              id: n.id,
+              type: 'custom',
+              position: n.position || { x: 100, y: 100 },
+              data: {
+                  label: n.label || 'VM',
+                  image: n.config?.image || 'ubuntu-20.04',
+                  cpu: n.config?.cpu || 1,
+                  ram: n.config?.ram || 1024,
+                  assets: n.config?.assets || [],
+                  automation: n.config?.automation || null,
+                  meta: n.meta || null,
+              }
+          }));
+          setNodes(newNodes);
+          const newEdges = (topo.edges || []).map((e, idx) => ({
+              id: e.id || `e${idx}`,
+              source: e.source,
+              target: e.target
+          }));
+          setEdges(newEdges);
+          if (topo.scenario) {
+              setScenarioConfig({ ...SCENARIO_DEFAULTS, ...(topo.scenario || {}) });
+          }
+          setMessageModal({ isOpen: true, title: 'Imported', message: `Imported ${newNodes.length} nodes from XML.`, type: 'success' });
+      } catch (err) {
+          console.error(err);
+          const msg = err?.response?.data?.detail || err.message || 'Import failed';
+          setMessageModal({ isOpen: true, title: 'Import Error', message: msg, type: 'error' });
+      } finally {
+          setImportBusy(false);
+      }
+  };
 
   useEffect(() => {
       let timer;
@@ -797,6 +938,51 @@ const NetworkBuilder = () => {
         <ReactFlowProvider>
             <div className="w-64 bg-background border-r border-border p-4 flex flex-col gap-4 z-10 overflow-y-auto">
                 <div className="text-secondary text-sm font-medium mb-2">Network Nodes</div>
+
+                <div className="bg-surface border border-border rounded p-3">
+                    <div className="text-xs text-secondary font-medium mb-2">Scan & Import (Nmap)</div>
+                    <input
+                        className="w-full bg-background border border-border rounded px-2 py-1 text-sm text-primary"
+                        value={scanTarget}
+                        onChange={(e) => setScanTarget(e.target.value)}
+                        placeholder="192.168.1.0/24"
+                    />
+                    <label className="mt-2 flex items-center gap-2 text-[11px] text-secondary select-none">
+                        <input
+                            type="checkbox"
+                            checked={scanDryRun}
+                            onChange={(e) => setScanDryRun(e.target.checked)}
+                        />
+                        Dry run (don’t scan)
+                    </label>
+                    <button
+                        onClick={scanAndImport}
+                        disabled={scanBusy}
+                        className="mt-2 w-full bg-accent hover:bg-accentHover disabled:opacity-50 text-white text-sm px-3 py-2 rounded"
+                        title="Requires backend env var RANGE_MAPPER_ENABLE=1"
+                    >
+                        {scanBusy ? 'Scanning...' : 'Scan & Import'}
+                    </button>
+
+                    <div className="mt-3 border-t border-border pt-3">
+                        <div className="text-xs text-secondary font-medium mb-2">Import from Nmap XML</div>
+                        <input
+                            type="file"
+                            accept=".xml"
+                            className="w-full text-[11px] text-secondary"
+                            onChange={(e) => {
+                                const f = e.target.files?.[0];
+                                if (f) importXmlAndConvert(f);
+                                e.target.value = null;
+                            }}
+                            disabled={importBusy}
+                        />
+                        <div className="mt-2 text-[11px] text-muted">Uploads XML to the server and imports it.</div>
+                    </div>
+                    <div className="mt-2 text-[11px] text-muted">
+                        Runs on the server. Only scans private ranges by default.
+                    </div>
+                </div>
                 
                 <div className="dndnode output p-3 bg-purple-900/30 border border-purple-700 rounded cursor-grab text-purple-100 hover:bg-purple-900/50 transition-colors flex items-center gap-2" onDragStart={(event) => event.dataTransfer.setData('application/reactflow', 'router')} draggable>
                     <Flag size={16} /> Router / Gateway

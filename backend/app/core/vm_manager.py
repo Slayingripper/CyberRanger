@@ -175,8 +175,9 @@ class VMManager:
         except Exception:
             vnc_port = None
         websocket_port = None
-        if state == 1 and vnc_port and vnc_port != '-1':
-            websocket_port = self.ensure_vnc_proxy(dom.name(), vnc_port)
+        # VNC Proxy is now handled by FastAPI directly
+        # if state == 1 and vnc_port and vnc_port != '-1':
+        #     websocket_port = self.ensure_vnc_proxy(dom.name(), vnc_port)
         return {
             "id": dom.ID(),
             "name": dom.name(),

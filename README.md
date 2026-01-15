@@ -33,8 +33,15 @@ A lightweight, scalable Cyber Range platform using QEMU/KVM and a modern web int
 
 ## Configuration
 - **Scenarios**: Add new scenarios in the `scenarios/` directory.
-- **Images**: Ensure QCOW2 images are available in the path specified in your scenarios (default `/var/lib/libvirt/images/`).
+- **Images**: Place images under `./images` (bind-mounted to `/app/images` in the backend). Scenarios can also auto-download images via `scenario.sources`.
+- **Frontend API URL**: `VITE_API_URL` (default: `http://localhost:8001/api`).
+- **Range Mapper**: set `RANGE_MAPPER_ENABLE=1` to allow scans.
+- **OpenWrt Auto-Download (optional)**:
+   - `OPENWRT_IMAGE_URL` (e.g. OpenWrt x86_64 `*.img.gz`)
+   - `OPENWRT_IMAGE_FILENAME` (download filename)
+   - `OPENWRT_IMAGE_OUTPUT` (extracted image name, default `openwrt.img`)
 
 ## Troubleshooting
 - **Permission Denied**: If the backend cannot connect to libvirt, ensure the socket permissions are correct or run docker-compose with `sudo`.
 - **NoVNC**: Ensure ports 6080-6100 are available.
+- **WebSocket Errors**: If you see “Unsupported upgrade request,” ensure the backend image was rebuilt after updating dependencies.

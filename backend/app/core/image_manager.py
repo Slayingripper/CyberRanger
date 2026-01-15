@@ -4,6 +4,7 @@ import tempfile
 import importlib
 import subprocess
 import bz2
+import gzip
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, Callable
 
@@ -76,7 +77,7 @@ async def ensure_image(source: Any, progress_cb: Optional[Callable[[Dict[str, An
 
     if extract:
         extract_type = extract.get("type")
-        if extract_type not in ("7z", "bz2"):
+        if extract_type not in ("7z", "bz2", "gz"):
             raise ValueError(f"unsupported extract type: {extract_type}")
         output_filename = _safe_filename(extract.get("output_filename") or "") or None
         if not output_filename:
@@ -85,6 +86,8 @@ async def ensure_image(source: Any, progress_cb: Optional[Callable[[Dict[str, An
                 output_filename = filename[:-3] + "qcow2"
             elif filename.lower().endswith(".bz2"):
                 output_filename = filename[:-4]
+            elif filename.lower().endswith(".gz"):
+                output_filename = filename[:-3]
             else:
                 raise ValueError("extract.output_filename is required")
         extract_member_glob = extract.get("member_glob")
@@ -315,6 +318,62 @@ async def ensure_image(source: Any, progress_cb: Optional[Callable[[Dict[str, An
                             data = decomp.decompress(chunk)
                             if data:
                                 fout.write(data)
+                    os.replace(tmp_out, final_path)
+                    if progress_cb:
+                        progress_cb(
+                            {
+                                "type": "extract_complete",
+                                "filename": filename,
+                                "final_name": final_name,
+                                "final_bytes": os.path.getsize(final_path) if os.path.exists(final_path) else 0,
+                            }
+                        )
+                except Exception:
+                    try:
+                        if os.path.exists(tmp_out):
+                            os.remove(tmp_out)
+                    finally:
+                        raise
+
+                if remove_archive:
+                    try:
+                        os.remove(archive_path)
+                    except OSError:
+                        pass
+
+                if os.path.getsize(final_path) < required_final_bytes:
+                    raise RuntimeError(
+                        f"extracted file is smaller than expected: {final_name} ({os.path.getsize(final_path)} bytes < {required_final_bytes} bytes)"
+                    )
+
+                return EnsureResult(filename=final_name, container_path=final_path)
+
+            if extract_type == "gz":
+                if os.path.exists(final_path) and os.path.getsize(final_path) >= required_final_bytes:
+                    return EnsureResult(filename=final_name, container_path=final_path)
+
+                if not os.path.exists(archive_path) or os.path.getsize(archive_path) < required_archive_bytes:
+                    raise RuntimeError("archive missing or smaller than expected; cannot extract")
+
+                if progress_cb:
+                    progress_cb(
+                        {
+                            "type": "extract_start",
+                            "filename": filename,
+                            "final_name": final_name,
+                            "archive_path": archive_path,
+                        }
+                    )
+
+                fd2, tmp_out = tempfile.mkstemp(prefix=f".{final_name}.", dir=images_dir)
+                os.close(fd2)
+                try:
+                    with gzip.open(archive_path, "rb") as fin, open(tmp_out, "wb") as fout:
+                        while True:
+                            chunk = fin.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            fout.write(chunk)
                     os.replace(tmp_out, final_path)
                     if progress_cb:
                         progress_cb(

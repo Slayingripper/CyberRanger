@@ -14,6 +14,10 @@ services:
     environment:
       - LIBVIRT_DEFAULT_URI=qemu:///system
       - HOST_WORK_DIR=${PWD}
+      - RANGE_MAPPER_ENABLE=1
+      - OPENWRT_IMAGE_URL=https://downloads.openwrt.org/releases/21.02.1/targets/x86/64/openwrt-21.02.1-x86-64-generic-ext4-combined.img.gz
+      - OPENWRT_IMAGE_FILENAME=openwrt-21.02.1-x86-64-generic-ext4-combined.img.gz
+      - OPENWRT_IMAGE_OUTPUT=openwrt.img
     # We need to run websockify as well. 
     # For this simple setup, we'll just run the API. 
     # In a real deployment, use supervisord or separate containers.
@@ -30,7 +34,7 @@ services:
       - ./frontend:/app
       - /app/node_modules
     environment:
-      - VITE_API_URL=http://localhost:8000/api
+      - VITE_API_URL=http://localhost:8001/api
     # This is a dev setup. For production, build and serve with nginx.
     command: sh -c "if [ ! -d node_modules ] || [ -z \"$$(ls -A node_modules 2>/dev/null)\" ]; then npm ci; fi; npm run dev -- --host 0.0.0.0"
     restart: unless-stopped

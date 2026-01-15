@@ -1,9 +1,11 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from app.core.vm_manager import vm_manager, WORK_DIR
 import os
 import glob
+import base64
+import json
 from app.core.image_manager import ensure_image
 import asyncio
 import time
@@ -14,6 +16,10 @@ from app.core.deploy_jobs import new_job, get_job, update_job, update_progress, 
 import xml.etree.ElementTree as ET
 
 router = APIRouter()
+
+# In-memory cache for last topology (best-effort; resets on restart)
+_TOPOLOGY_CACHE: Dict[str, Any] = {}
+_TOPOLOGY_CACHE_TS: Optional[float] = None
 
 
 def _normalize_host_work_dir(host_work_dir: str) -> str:
@@ -48,6 +54,8 @@ def _resolve_image_path(image_key: str) -> str:
         "gateway": "vyos.qcow2",
         "security-onion": "securityonion.iso",
         "opnsense": "opnsense.img",
+        "openwrt": "openwrt.qcow2",
+        "contiki-ng": "contiki-ng.qcow2",
     }
 
     def _pick_best_match(paths: List[str]) -> Optional[str]:
@@ -95,6 +103,10 @@ def _resolve_image_path(image_key: str) -> str:
         patterns = ["securityonion*.iso", "security-onion*.iso", "securityonion.iso"]
     elif image_key in ("opnsense", "opn-sense"):
         patterns = ["opnsense.img", "OPNsense-*-vga-amd64.img", "opnsense*.img", "OPNsense-*.img"]
+    elif image_key in ("openwrt", "open-wrt"):
+        patterns = ["openwrt*.qcow2", "openwrt*.img", "openwrt*.iso"]
+    elif image_key in ("contiki-ng", "contiki"):
+        patterns = ["contiki*.qcow2", "contiki*.img"]
     else:
         patterns = [f"{image_key}.qcow2", f"{image_key}.img"]
 
@@ -113,6 +125,42 @@ def _slugify(value: str) -> str:
     s = "".join((c.lower() if c.isalnum() else "-") for c in (value or ""))
     s = "-".join([p for p in s.split("-") if p])
     return s or "topology"
+
+
+def _build_cloud_init_assets(assets: List[Dict[str, Any]]) -> Tuple[List[str], List[str]]:
+    packages: List[str] = []
+    runcmds: List[str] = []
+
+    for asset in assets or []:
+        atype = asset.get("type")
+        if atype == "package":
+            val = asset.get("value")
+            if val:
+                packages.append(str(val))
+        elif atype == "command":
+            val = asset.get("value")
+            if val:
+                runcmds.append(str(val))
+        elif atype == "ansible":
+            playbook = asset.get("playbook")
+            if not playbook:
+                continue
+            playbook_name = asset.get("playbook_name") or "playbook.yml"
+            extra_vars = asset.get("extra_vars")
+            install_ansible = asset.get("install", True)
+
+            if install_ansible:
+                packages.append("ansible")
+
+            b64 = base64.b64encode(str(playbook).encode("utf-8")).decode("ascii")
+            runcmds.append(f"printf '%s' '{b64}' | base64 -d > /tmp/{playbook_name}")
+
+            cmd = f"ansible-playbook -c local -i localhost, /tmp/{playbook_name}"
+            if isinstance(extra_vars, dict) and extra_vars:
+                cmd += f" --extra-vars '{json.dumps(extra_vars)}'"
+            runcmds.append(cmd)
+
+    return packages, runcmds
 
 
 def _connected_components(node_ids: List[str], edges: List[Any]) -> Dict[str, int]:
@@ -292,6 +340,21 @@ async def delete_vm(name: str):
         return {"status": "deleted"}
     raise HTTPException(status_code=404, detail="VM not found or could not be deleted")
 
+
+@router.post("/topology/cache")
+async def cache_topology(payload: Dict[str, Any]):
+    global _TOPOLOGY_CACHE, _TOPOLOGY_CACHE_TS
+    _TOPOLOGY_CACHE = payload or {}
+    _TOPOLOGY_CACHE_TS = time.time()
+    return {"status": "cached", "updated_at": _TOPOLOGY_CACHE_TS}
+
+
+@router.get("/topology/cache")
+async def get_cached_topology():
+    if not _TOPOLOGY_CACHE:
+        raise HTTPException(status_code=404, detail="No cached topology")
+    return {"topology": _TOPOLOGY_CACHE, "updated_at": _TOPOLOGY_CACHE_TS}
+
 class TopologyNodeConfig(BaseModel):
     image: str
     cpu: int
@@ -391,14 +454,7 @@ async def deploy_topology(topology: TopologyDeployRequest):
                     raise HTTPException(status_code=500, detail=f"Failed to create network {net_name}")
 
     for node in topology.nodes:
-        packages = []
-        runcmds = []
-        for asset in node.config.assets:
-            if asset['type'] == 'package':
-                packages.append(asset['value'])
-            elif asset['type'] == 'command':
-                runcmds.append(asset['value'])
-        
+        packages, runcmds = _build_cloud_init_assets(node.config.assets)
         packages_str = "\n".join([f"  - {p}" for p in packages])
         
         cloud_init = {
@@ -660,11 +716,7 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest):
             # Build cloud-init from node assets (same as sync deploy)
             packages = []
             runcmds = []
-            for asset in node.config.assets:
-                if asset['type'] == 'package':
-                    packages.append(asset['value'])
-                elif asset['type'] == 'command':
-                    runcmds.append(asset['value'])
+            packages, runcmds = _build_cloud_init_assets(node.config.assets)
 
             packages_str = "\n".join([f"  - {p}" for p in packages])
             cloud_init = {

@@ -1,0 +1,138 @@
+# Device profile library used by the range mapper.
+# These are *hints* that map Nmap-derived signals -> a reasonable VM template.
+# Adjust image keys to match what you actually have under ./images.
+
+profiles:
+  - name: "Network Printer"
+    priority: 90
+    match:
+      ports_any: [515, 631, 9100]
+      services_any: ["printer", "ipp"]
+      hostname_contains: ["printer", "hp", "brother", "canon", "epson"]
+    config:
+      image: "ubuntu-20.04"
+      cpu: 1
+      ram: 1024
+      assets:
+        - type: "package"
+          value: "cups"
+        - type: "command"
+          value: "systemctl enable --now cups"
+
+  - name: "IP Camera"
+    priority: 85
+    match:
+      ports_any: [554, 8554, 1935]
+      services_any: ["rtsp"]
+      hostname_contains: ["cam", "camera", "hik", "dahua"]
+    config:
+      image: "ubuntu-20.04"
+      cpu: 1
+      ram: 1024
+      assets:
+        - type: "package"
+          value: "ffmpeg"
+        - type: "command"
+          value: "nohup ffmpeg -re -stream_loop -1 -f lavfi -i testsrc=size=640x360:rate=15 -f rtsp -rtsp_transport tcp rtsp://0.0.0.0:8554/stream >/var/log/rtsp.log 2>&1 &"
+
+  - name: "Smart TV / Cast"
+    priority: 80
+    match:
+      ports_any: [8008, 8009, 1900]
+      services_any: ["ssdp", "http"]
+      hostname_contains: ["tv", "bravia", "samsung", "lg", "chromecast"]
+    config:
+      image: "ubuntu-20.04"
+      cpu: 1
+      ram: 1024
+      assets:
+        - type: "package"
+          value: "avahi-daemon"
+        - type: "package"
+          value: "nginx"
+        - type: "command"
+          value: "systemctl enable --now avahi-daemon"
+        - type: "command"
+          value: "systemctl enable --now nginx"
+
+  - name: "IoT Device (Contiki-NG)"
+    priority: 78
+    match:
+      roles_any: ["iot"]
+      ports_any: [1883, 5683, 5684]
+    config:
+      image: "ubuntu-20.04"
+      cpu: 1
+      ram: 1024
+      assets:
+        - type: "package"
+          value: "mosquitto"
+        - type: "package"
+          value: "mosquitto-clients"
+        - type: "package"
+          value: "libcoap2-bin"
+        - type: "command"
+          value: "systemctl enable --now mosquitto"
+
+  - name: "Router / Gateway (OpenWrt)"
+    priority: 72
+    match:
+      hostname_contains: ["router", "gateway", "gw", "openwrt"]
+    config:
+      image: "openwrt"
+      cpu: 1
+      ram: 512
+      assets: []
+
+  - name: "NAS / Fileshare"
+    priority: 75
+    match:
+      roles_any: ["fileshare"]
+      ports_any: [2049, 111, 445, 139]
+    config:
+      image: "ubuntu-20.04"
+      cpu: 2
+      ram: 2048
+      assets:
+        - type: "package"
+          value: "samba"
+
+  - name: "Windows Workstation"
+    priority: 70
+    match:
+      roles_any: ["rdp"]
+      os_contains: ["windows"]
+    config:
+      image: "windows-10"
+      cpu: 2
+      ram: 4096
+      assets: []
+
+  - name: "Linux Server"
+    priority: 10
+    match:
+      roles_any: ["ssh", "web", "dns", "database"]
+    config:
+      image: "ubuntu-20.04"
+      cpu: 2
+      ram: 2048
+      assets:
+        - type: "ansible"
+          playbook_name: "baseline.yml"
+          playbook: |
+            - name: Baseline configuration
+              hosts: localhost
+              connection: local
+              gather_facts: false
+              tasks:
+                - name: Ensure base packages
+                  apt:
+                    name:
+                      - curl
+                      - openssh-server
+                    state: present
+                    update_cache: true
+                - name: Drop marker
+                  copy:
+                    dest: /etc/cyberrange-baseline
+                    content: "ansible-baseline-applied\n"

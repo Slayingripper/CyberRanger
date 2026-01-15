@@ -3,3 +3,10 @@ images/*
 backend/data/images/*
 backend/data/disks/*
 disks/*
+
+# Python bytecode
+**/__pycache__/
+*.py[cod]
+
+# Generated runtime artifacts
+backend/training_runs/

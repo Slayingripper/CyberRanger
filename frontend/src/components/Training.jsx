@@ -4,11 +4,7 @@ import axios from 'axios';
 import TrainingEditor from './TrainingEditor';
 import VNCViewer from './VNCViewer';
 import Modal from './Modal';
-
-const getApiUrl = () => {
-  const hostname = window.location.hostname;
-  return `http://${hostname}:8001/api`;
-};
+import { getApiUrl } from '../lib/api';
 
 function Training() {
   const [trainings, setTrainings] = useState([]);
@@ -297,10 +293,10 @@ function Training() {
                                                 {vm.error || "Unknown error"}
                                             </div>
                                         )}
-                                        {vm.state === 1 && vm.websocket_port && (
+                                        {vm.state === 1 && vm.vnc_port && (
                                             <div className="mt-2">
                                                 <VNCViewer 
-                                                    url={`ws://${window.location.hostname}:${vm.websocket_port}`} 
+                                                    url={`${API_URL.replace(/^http/, 'ws')}/ws/vnc/${vm.vnc_port}`}
                                                     viewOnly={false}
                                                 />
                                             </div>

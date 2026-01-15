@@ -2,11 +2,7 @@ import React, { useState } from 'react';
 import { Plus, Trash2, Save, ArrowLeft, Settings, Layers, FileText, HelpCircle, CheckSquare, Monitor } from 'lucide-react';
 import axios from 'axios';
 import Modal from './Modal';
-
-const getApiUrl = () => {
-  const hostname = window.location.hostname;
-  return `http://${hostname}:8001/api`;
-};
+import { getApiUrl } from '../lib/api';
 
 function TrainingEditor({ training, onSave, onCancel }) {
   const [editedTraining, setEditedTraining] = useState(training);

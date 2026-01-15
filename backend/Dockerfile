@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y \
     genisoimage \
     qemu-utils \
     p7zip-full \
+    nmap \
     git \
     && rm -rf /var/lib/apt/lists/*
 

@@ -9,12 +9,13 @@ export default function VNCConsole({ host, port, vmName, onClose }) {
   useEffect(() => {
     if (!screenRef.current) return;
 
-    // Construct WebSocket URL
-    // If host is localhost, use window.location.hostname to support remote access if needed
-    const targetHost = host === 'localhost' ? window.location.hostname : host;
-    const url = `ws://${targetHost}:${port}`;
+    // Construct WebSocket URL for Proxy
+    // We ignore 'host' (usually localhost) and point to our API proxy
+    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const hostname = window.location.hostname;
+    const url = `${protocol}://${hostname}:8001/api/ws/vnc/${port}`;
     
-    console.log(`Connecting to VNC at ${url}`);
+    console.log(`Connecting to VNC Proxy at ${url}`);
 
     try {
         const rfb = new RFB(screenRef.current, url);
