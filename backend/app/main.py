@@ -13,9 +13,8 @@ app = FastAPI(title="CyberRange API")
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    # For local dev, allow localhost/127.0.0.1 on any port (Vite, etc.).
-    allow_origins=[],
-    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1)(:\d+)?$",
+    # Allow all origins for local dev (no credentials).
+    allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -5,6 +5,7 @@ import { getApiUrl } from './lib/api';
 import Images from './components/Images';
 import VNCConsole from './components/VNCConsole';
 import NetworkBuilder from './components/NetworkBuilder';
+import TopologyViewer from './components/TopologyViewer';
 import Settings from './components/Settings';
 import Training from './components/Training';
 import Modal from './components/Modal';
@@ -15,23 +16,33 @@ const API_URL = getApiUrl();
 function AppContent() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [vms, setVms] = useState([]);
+  const [deployments, setDeployments] = useState({});
   const [loading, setLoading] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [activeConsole, setActiveConsole] = useState(null);
+  const [topologyToView, setTopologyToView] = useState(null);
   const [deleteConfirm, setDeleteConfirm] = useState({ isOpen: false, vmName: null });
 
   useEffect(() => {
-    fetchVMs();
+    fetchData();
+    const interval = setInterval(fetchData, 5000);
+    return () => clearInterval(interval);
   }, []);
 
-  const fetchVMs = async () => {
+  const fetchData = async () => {
     try {
-      const response = await axios.get(`${API_URL}/vms`);
-      setVms(response.data);
+      const [vmsRes, depsRes] = await Promise.all([
+          axios.get(`${API_URL}/vms`),
+          axios.get(`${API_URL}/deployments`)
+      ]);
+      setVms(vmsRes.data);
+      setDeployments(depsRes.data);
     } catch (error) {
-      console.error("Error fetching VMs:", error);
+      console.error("Error fetching data:", error);
     }
   };
+
+  const fetchVMs = fetchData; // Alias for compatibility with existing functions calling fetchVMs
 
   const handleStartVM = async (name) => {
     await axios.post(`${API_URL}/vms/${name}/start`);
@@ -81,12 +92,14 @@ function AppContent() {
           {activeTab === 'dashboard' && (
             <Dashboard 
               vms={vms} 
+              deployments={deployments} // Pass deployments
               onStart={handleStartVM} 
               onStop={handleStopVM} 
               onDelete={handleDeleteVM}
-              onRefresh={fetchVMs}
+              onRefresh={fetchData} // Use fetchData
               onCreate={() => setShowCreateModal(true)}
               onOpenConsole={(vm) => setActiveConsole({ host: 'localhost', port: vm.vnc_port, name: vm.name })}
+              onViewTopology={(topology) => setTopologyToView(topology)}
             />
           )}
           {activeTab === 'images' && <Images />}
@@ -95,6 +108,10 @@ function AppContent() {
           {activeTab === 'settings' && <Settings />}
         </main>
       </div>
+
+      {topologyToView && (
+          <TopologyViewer topology={topologyToView} onClose={() => setTopologyToView(null)} />
+      )}
 
       {showCreateModal && (
         <CreateVMModal onClose={() => setShowCreateModal(false)} onCreated={() => { setShowCreateModal(false); fetchVMs(); }} />
@@ -150,76 +167,150 @@ function SidebarItem({ icon, label, active, onClick }) {
   );
 }
 
-function Dashboard({ vms, onStart, onStop, onDelete, onRefresh, onCreate, onOpenConsole }) {
+function Dashboard({ vms, deployments, onStart, onStop, onDelete, onRefresh, onCreate, onOpenConsole, onViewTopology }) {
+  const groupedVMs = React.useMemo(() => {
+    const groups = {};
+    const deployedVMNames = new Set();
+    const deps = deployments || {}; 
+
+    Object.values(deps).forEach(dep => {
+        groups[dep.id] = { ...dep, vmObjects: [] };
+        if (dep.vms) dep.vms.forEach(name => deployedVMNames.add(name));
+    });
+
+    const other = [];
+    vms.forEach(vm => {
+        let found = false;
+        for (const depId in groups) {
+            if (groups[depId].vms && groups[depId].vms.includes(vm.name)) {
+                groups[depId].vmObjects.push(vm);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            other.push(vm);
+        }
+    });
+    
+    // Sort groups by timestamp descending
+    const sortedGroups = Object.values(groups).sort((a, b) => b.timestamp - a.timestamp);
+    
+    return { groups: sortedGroups, other };
+  }, [vms, deployments]);
+
+  const VMCard = ({ vm }) => (
+      <div className="bg-surface rounded-xl border border-border p-6 shadow-lg">
+        <div className="flex justify-between items-start mb-4">
+          <div>
+            <h3 className="text-lg font-bold text-primary">{vm.name}</h3>
+            <span className={`text-xs px-2 py-1 rounded-full ${
+              vm.state === 1 ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'
+            }`}>
+              {vm.state === 1 ? 'Running' : 'Stopped'}
+            </span>
+          </div>
+          <Monitor className="text-secondary" />
+        </div>
+        
+        <div className="space-y-2 text-sm text-secondary mb-6">
+          <div className="flex justify-between">
+            <span>Memory:</span>
+            <span>{Math.round(vm.memory / 1024)} MB</span>
+          </div>
+          <div className="flex justify-between">
+            <span>vCPUs:</span>
+            <span>{vm.vcpus}</span>
+          </div>
+          <div className="flex justify-between">
+            <span>VNC Port:</span>
+            <span>{vm.vnc_port || 'N/A'}</span>
+          </div>
+        </div>
+
+        <div className="flex space-x-2">
+          {vm.state !== 1 ? (
+            <button onClick={() => onStart(vm.name)} className="flex-1 bg-green-600 hover:bg-green-700 text-primary py-2 rounded flex items-center justify-center space-x-2">
+              <Play size={16} /> <span>Start</span>
+            </button>
+          ) : (
+            <button onClick={() => onStop(vm.name)} className="flex-1 bg-yellow-600 hover:bg-yellow-700 text-primary py-2 rounded flex items-center justify-center space-x-2">
+              <Square size={16} /> <span>Stop</span>
+            </button>
+          )}
+          <button onClick={() => onDelete(vm.name)} className="px-3 bg-red-900/50 hover:bg-red-900 text-red-200 rounded">
+            Delete
+          </button>
+        </div>
+        
+        {vm.state === 1 && vm.vnc_port && (
+           <button 
+             onClick={() => onOpenConsole(vm)}
+             className="mt-3 block w-full text-center bg-accent/30 hover:bg-accent/50 text-accent py-2 rounded border border-accent"
+           >
+             Open Console (NoVNC)
+           </button>
+        )}
+      </div>
+  );
+
   return (
     <div>
       <div className="flex justify-between items-center mb-6">
         <h2 className="text-xl font-semibold text-primary">Active Virtual Machines</h2>
-        <button onClick={onRefresh} className="bg-surfaceHover hover:opacity-80 text-primary px-4 py-2 rounded text-sm">Refresh</button>
-      </div>
-      
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {vms.map(vm => (
-          <div key={vm.uuid} className="bg-surface rounded-xl border border-border p-6 shadow-lg">
-            <div className="flex justify-between items-start mb-4">
-              <div>
-                <h3 className="text-lg font-bold text-primary">{vm.name}</h3>
-                <span className={`text-xs px-2 py-1 rounded-full ${
-                  vm.state === 1 ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'
-                }`}>
-                  {vm.state === 1 ? 'Running' : 'Stopped'}
-                </span>
-              </div>
-              <Monitor className="text-secondary" />
-            </div>
-            
-            <div className="space-y-2 text-sm text-secondary mb-6">
-              <div className="flex justify-between">
-                <span>Memory:</span>
-                <span>{Math.round(vm.memory / 1024)} MB</span>
-              </div>
-              <div className="flex justify-between">
-                <span>vCPUs:</span>
-                <span>{vm.vcpus}</span>
-              </div>
-              <div className="flex justify-between">
-                <span>VNC Port:</span>
-                <span>{vm.vnc_port || 'N/A'}</span>
-              </div>
-            </div>
-
-            <div className="flex space-x-2">
-              {vm.state !== 1 ? (
-                <button onClick={() => onStart(vm.name)} className="flex-1 bg-green-600 hover:bg-green-700 text-primary py-2 rounded flex items-center justify-center space-x-2">
-                  <Play size={16} /> <span>Start</span>
-                </button>
-              ) : (
-                <button onClick={() => onStop(vm.name)} className="flex-1 bg-yellow-600 hover:bg-yellow-700 text-primary py-2 rounded flex items-center justify-center space-x-2">
-                  <Square size={16} /> <span>Stop</span>
-                </button>
-              )}
-              <button onClick={() => onDelete(vm.name)} className="px-3 bg-red-900/50 hover:bg-red-900 text-red-200 rounded">
-                Delete
-              </button>
-            </div>
-            
-            {vm.state === 1 && vm.vnc_port && (
-               <button 
-                 onClick={() => onOpenConsole(vm)}
-                 className="mt-3 block w-full text-center bg-accent/30 hover:bg-accent/50 text-accent py-2 rounded border border-accent"
-               >
-                 Open Console (NoVNC)
-               </button>
-            )}
-          </div>
-        ))}
-        
-        {/* Add New VM Card */}
-        <div onClick={onCreate} className="bg-surface/50 rounded-xl border border-border border-dashed p-6 flex flex-col items-center justify-center text-secondary hover:text-primary hover:border-secondary cursor-pointer transition-all min-h-[200px]">
-          <Plus size={48} className="mb-2" />
-          <span className="font-medium">Create New VM</span>
+        <div className="flex gap-4">
+             <div onClick={onCreate} className="cursor-pointer flex items-center gap-2 bg-accent hover:bg-accentHover text-primary px-4 py-2 rounded text-sm font-medium">
+                <Plus size={16} /> Create New VM
+             </div>
+             <button onClick={onRefresh} className="bg-surfaceHover hover:opacity-80 text-primary px-4 py-2 rounded text-sm">Refresh</button>
         </div>
       </div>
+      
+      {groupedVMs.groups.map(group => (
+         <div key={group.id} className="mb-10 animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <div className="flex justify-between items-center mb-4 border-b border-border pb-2">
+                 <div className="flex items-center gap-3">
+                     <Network className="text-accent" size={24} />
+                     <div>
+                        <h3 className="text-xl font-bold text-primary">{group.name}</h3>
+                        <div className="text-xs text-secondary">ID: {group.id} • {new Date(group.timestamp * 1000).toLocaleString()}</div>
+                     </div>
+                 </div>
+                 {group.topology && (
+                     <button onClick={() => onViewTopology(group.topology)} className="text-accent hover:text-accentHover text-sm flex items-center gap-2 px-3 py-1.5 rounded-lg bg-surface border border-border hover:bg-surfaceHover transition-all">
+                         <Network size={16} /> View Topology
+                     </button>
+                 )}
+            </div>
+            {group.vmObjects.length > 0 ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    {group.vmObjects.map(vm => (
+                        <VMCard key={vm.uuid} vm={vm} />
+                    ))}
+                </div>
+            ) : (
+                <div className="text-secondary italic bg-surface/30 p-4 rounded text-center border border-border border-dashed">No active VMs found for this topology (they might be stopped or deleted).</div>
+            )}
+         </div>
+      ))}
+
+      {groupedVMs.other.length > 0 && (
+         <div className="mb-8">
+             <h3 className="text-lg font-bold text-secondary uppercase tracking-wider mb-4 border-b border-border pb-2 mt-8">Uncategorized VMs</h3>
+             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {groupedVMs.other.map(vm => (
+                    <VMCard key={vm.uuid} vm={vm} />
+                ))}
+             </div>
+         </div>
+      )}
+      
+      {(vms.length === 0) && (
+          <div className="text-center py-20 bg-surface/20 rounded-xl border border-border border-dashed">
+              <div className="text-secondary text-lg">No virtual machines found.</div>
+              <div className="text-secondary/60 text-sm mt-2">Deploy a topology or create a VM manually to get started.</div>
+          </div>
+      )}
     </div>
   );
 }

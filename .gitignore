@@ -3,7 +3,7 @@ images/*
 backend/data/images/*
 backend/data/disks/*
 disks/*
-
+*.code-workspace
 # Python bytecode
 **/__pycache__/
 *.py[cod]

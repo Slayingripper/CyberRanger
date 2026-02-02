@@ -45,10 +45,14 @@ const PREDEFINED_TOPOLOGIES = {
             name: 'ISO Install Lab',
             team: 'blue',
             objective: 'Boot Linux installers from ISO and install manually.',
-            difficulty: 'easy'
+            difficulty: 'easy',
+            sources: {
+                'ubuntu-24.04.1-live-server-amd64.iso': 'https://releases.ubuntu.com/24.04/ubuntu-24.04.1-live-server-amd64.iso',
+                'xubuntu-24.04.3-minimal-amd64.iso': 'https://cdimage.ubuntu.com/xubuntu/releases/24.04/release/xubuntu-24.04.3-minimal-amd64.iso'
+            }
         },
         nodes: [
-            { id: '1', type: 'custom', position: { x: 120, y: 120 }, data: { label: 'Installer VM 1 (Xubuntu ISO)', image: 'xubuntu-24.04.3-minimal-amd64.iso', cpu: 2, ram: 2048, assets: [] } },
+            { id: '1', type: 'custom', position: { x: 180, y: 120 }, data: { label: 'Installer VM 1 (Ubuntu ISO)', image: 'ubuntu-24.04.1-live-server-amd64.iso', cpu: 2, ram: 2048, assets: [] } },
             { id: '2', type: 'custom', position: { x: 460, y: 120 }, data: { label: 'Installer VM 2 (Xubuntu ISO)', image: 'xubuntu-24.04.3-minimal-amd64.iso', cpu: 2, ram: 2048, assets: [] } }
         ],
         edges: [
@@ -62,8 +66,7 @@ const PREDEFINED_TOPOLOGIES = {
             objective: 'Deploy the Smart Home PV challenge services on a single game-server VM.',
             difficulty: 'hard',
             sources: {
-                // Auto-download Ubuntu base image if missing
-                'ubuntu-20.04': 'https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-amd64.img'
+                'nixos-25.11-graphical.iso': 'https://channels.nixos.org/nixos-25.11/latest-nixos-graphical-x86_64-linux.iso'
             }
         },
         nodes: [
@@ -72,15 +75,14 @@ const PREDEFINED_TOPOLOGIES = {
                 type: 'custom',
                 position: { x: 240, y: 140 },
                 data: {
-                    label: 'game-server (Ubuntu)',
-                    image: 'ubuntu-20.04',
+                    label: 'game-server (NixOS)',
+                    image: 'nixos-25.11-graphical.iso',
                     cpu: 4,
                     ram: 8192,
                     assets: [
-                        { type: 'package', value: 'git' },
-                        { type: 'package', value: 'docker.io' },
-                        { type: 'package', value: 'docker-compose' },
-                        { type: 'command', value: 'systemctl enable --now docker' },
+                        { type: 'command', value: 'bash -lc "cat > /etc/nixos/configuration.nix <<EOF\n{ config, pkgs, ... }:\n{\n  networking.useDHCP = true;\n  time.timeZone = \\\"UTC\\\";\n  services.openssh.enable = true;\n\n  users.users.user = {\n    isNormalUser = true;\n    extraGroups = [ \\\"wheel\\\" \\\"docker\\\" ];\n    initialPassword = \\\"password\\\";\n  };\n  users.users.root.initialPassword = \\\"password\\\";\n  security.sudo.wheelNeedsPassword = false;\n\n  services.xserver.enable = true;\n  services.xserver.displayManager.lightdm.enable = true;\n  services.xserver.desktopManager.xfce.enable = true;\n\n  virtualisation.docker.enable = true;\n  environment.systemPackages = with pkgs; [\n    git\n    docker-compose\n  ];\n}\nEOF\n\n/nix/var/nix/profiles/system/bin/nixos-rebuild switch"' },
+                        { type: 'command', value: 'systemctl start docker || true' },
+                        { type: 'command', value: 'mkdir -p /opt && chown user:user /opt' },
                         { type: 'command', value: 'cd /opt && (test -d sl1-2 || git clone --depth 1 https://github.com/Slayingripper/SL1-2.git sl1-2)' },
                         { type: 'command', value: 'docker network inspect playground-net >/dev/null 2>&1 || docker network create --subnet 172.20.0.0/24 playground-net' },
                         { type: 'command', value: 'cd /opt/sl1-2/provisioning/files/smart-home-pv && (docker compose up -d --build || docker-compose up -d --build)' }
@@ -97,8 +99,7 @@ const PREDEFINED_TOPOLOGIES = {
             objective: 'Kali attacker VM + game-server VM + OPNsense blue-team gateway.',
             difficulty: 'hard',
             sources: {
-                // Auto-download Ubuntu base image if missing
-                'ubuntu-20.04': 'https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-amd64.img',
+                'nixos-25.11-graphical.iso': 'https://channels.nixos.org/nixos-25.11/latest-nixos-graphical-x86_64-linux.iso',
 
                 // Kali QEMU image is distributed as a .7z; backend will download + extract to qcow2.
                 'kali-linux': {
@@ -141,15 +142,13 @@ const PREDEFINED_TOPOLOGIES = {
                 type: 'custom',
                 position: { x: 360, y: 140 },
                 data: {
-                    label: 'game-server (Ubuntu)',
-                    image: 'ubuntu-20.04',
+                    label: 'game-server (NixOS)',
+                    image: 'nixos-25.11-graphical.iso',
                     cpu: 4,
                     ram: 8192,
                     assets: [
-                        { type: 'package', value: 'git' },
-                        { type: 'package', value: 'docker.io' },
-                        { type: 'package', value: 'docker-compose' },
-                        { type: 'command', value: 'systemctl enable --now docker' },
+                        { type: 'command', value: 'bash -lc "cat > /etc/nixos/configuration.nix <<EOF\n{ config, pkgs, ... }:\n{\n  networking.useDHCP = true;\n  time.timeZone = \"UTC\";\n  services.openssh.enable = true;\n\n  users.users.user = {\n    isNormalUser = true;\n    extraGroups = [ \"wheel\" \"docker\" ];\n    initialPassword = \"password\";\n  };\n  users.users.root.initialPassword = \"password\";\n  security.sudo.wheelNeedsPassword = false;\n\n  services.xserver.enable = true;\n  services.xserver.displayManager.lightdm.enable = true;\n  services.xserver.desktopManager.xfce.enable = true;\n\n  virtualisation.docker.enable = true;\n  environment.systemPackages = with pkgs; [\n    git\n    docker-compose\n  ];\n}\nEOF\n\n/nix/var/nix/profiles/system/bin/nixos-rebuild switch"' },
+                        { type: 'command', value: 'systemctl start docker || true' },
                         { type: 'command', value: 'mkdir -p /opt && chown user:user /opt' },
                         { type: 'command', value: 'cd /opt && (test -d sl1-2 || git clone --depth 1 https://github.com/Slayingripper/SL1-2.git sl1-2)' },
                         { type: 'command', value: 'docker network inspect playground-net >/dev/null 2>&1 || docker network create --subnet 172.20.0.0/24 playground-net' },
@@ -188,6 +187,79 @@ const PREDEFINED_TOPOLOGIES = {
         ],
         edges: [
             { id: 'e1-2', source: '1', target: '2' }
+        ]
+    },
+    "sl1-2-red-green-blue": {
+        scenario: {
+            name: 'SL1-2: Red/Green/Blue (3 VMs)',
+            team: 'blue',
+            objective: 'Red team attacks, Green runs services, Blue monitors with ntopng.',
+            difficulty: 'medium',
+            sources: {
+                'nixos-25.11-graphical.iso': 'https://channels.nixos.org/nixos-25.11/latest-nixos-graphical-x86_64-linux.iso',
+                'kali-linux': {
+                    url: 'https://cdimage.kali.org/current/kali-linux-2025.4-qemu-amd64.7z',
+                    filename: 'kali-linux-2025.4-qemu-amd64.7z',
+                    extract: {
+                        type: '7z',
+                        output_filename: 'kali-linux-2025.4-qemu-amd64.qcow2',
+                        member_glob: '*.qcow2'
+                    }
+                }
+            }
+        },
+        nodes: [
+            {
+                id: 'red',
+                type: 'custom',
+                position: { x: 80, y: 120 },
+                data: {
+                    label: 'Red Team (Kali)',
+                    image: 'kali-linux',
+                    cpu: 2,
+                    ram: 4096,
+                    assets: [{ type: 'package', value: 'nmap' }]
+                }
+            },
+            {
+                id: 'green',
+                type: 'custom',
+                position: { x: 360, y: 120 },
+                data: {
+                    label: 'Green Team (Services + UI)',
+                    image: 'nixos-25.11-graphical.iso',
+                    cpu: 2,
+                    ram: 4096,
+                    assets: [
+                        { type: 'command', value: 'bash -lc "cat > /etc/nixos/configuration.nix <<EOF\n{ config, pkgs, ... }:\n{\n  networking.useDHCP = true;\n  time.timeZone = \"UTC\";\n  services.openssh.enable = true;\n\n  users.users.user = {\n    isNormalUser = true;\n    extraGroups = [ \"wheel\" \"docker\" ];\n    initialPassword = \"password\";\n  };\n  users.users.root.initialPassword = \"password\";\n  security.sudo.wheelNeedsPassword = false;\n\n  services.xserver.enable = true;\n  services.xserver.displayManager.lightdm.enable = true;\n  services.xserver.desktopManager.xfce.enable = true;\n\n  virtualisation.docker.enable = true;\n  environment.systemPackages = with pkgs; [\n    git\n    docker-compose\n  ];\n}\nEOF\n\n/nix/var/nix/profiles/system/bin/nixos-rebuild switch"' },
+                        { type: 'command', value: 'systemctl start docker || true' },
+                        { type: 'command', value: 'mkdir -p /opt/green && echo "Green VM ready" > /opt/green/STATUS.txt' },
+                        { type: 'command', value: 'mkdir -p /opt && chown user:user /opt' },
+                        { type: 'command', value: 'cd /opt && (test -d sl1-2 || git clone --depth 1 https://github.com/Slayingripper/SL1-2.git sl1-2)' },
+                        { type: 'command', value: 'docker network inspect playground-net >/dev/null 2>&1 || docker network create --subnet 172.20.0.0/24 playground-net' },
+                        { type: 'command', value: 'cd /opt/sl1-2/provisioning/files/smart-home-pv && (docker compose up -d --build || docker-compose up -d --build)' }
+                    ]
+                }
+            },
+            {
+                id: 'blue',
+                type: 'custom',
+                position: { x: 640, y: 120 },
+                data: {
+                    label: 'Blue Team (ntopng)',
+                    image: 'nixos-25.11-graphical.iso',
+                    cpu: 2,
+                    ram: 4096,
+                    assets: [
+                        { type: 'command', value: 'bash -lc "cat > /etc/nixos/configuration.nix <<EOF\n{ config, pkgs, ... }:\n{\n  networking.useDHCP = true;\n  time.timeZone = \"UTC\";\n  services.openssh.enable = true;\n\n  users.users.user = {\n    isNormalUser = true;\n    extraGroups = [ \"wheel\" ];\n    initialPassword = \"password\";\n  };\n  users.users.root.initialPassword = \"password\";\n  security.sudo.wheelNeedsPassword = false;\n\n  services.xserver.enable = true;\n  services.xserver.displayManager.lightdm.enable = true;\n  services.xserver.desktopManager.xfce.enable = true;\n\n  services.ntopng.enable = true;\n  services.ntopng.httpPort = 3000;\n\n  environment.systemPackages = with pkgs; [\n    ntopng\n  ];\n}\nEOF\n\n/nix/var/nix/profiles/system/bin/nixos-rebuild switch"' },
+                        { type: 'command', value: 'systemctl restart ntopng || true' }
+                    ]
+                }
+            }
+        ],
+        edges: [
+            { id: 'e-red-green', source: 'red', target: 'green' },
+            { id: 'e-blue-green', source: 'blue', target: 'green' }
         ]
     }
 };
@@ -290,7 +362,8 @@ const NetworkBuilder = () => {
       (async () => {
           try {
               const res = await axios.get(`${API_URL}/topology/cache`);
-              const topo = res.data?.topology;
+              // Backend returns the topology object directly, or wrapped. checking checks.
+              const topo = res.data?.topology || res.data;
               if (topo?.nodes || topo?.edges) {
                   const savedNodes = topo.nodes || [];
                   const savedEdges = topo.edges || [];
@@ -752,6 +825,7 @@ const NetworkBuilder = () => {
           nodes: nodes.map(n => ({
               id: n.id,
               label: n.data.label,
+              position: n.position,
               config: {
                   image: n.data.image,
                   cpu: n.data.cpu,
@@ -761,6 +835,7 @@ const NetworkBuilder = () => {
               }
           })),
           edges: edges.map(e => ({
+              id: e.id,
               source: e.source,
               target: e.target
           }))
@@ -807,6 +882,7 @@ const NetworkBuilder = () => {
                         <button onClick={() => loadPreset('iso-install-lab')} className="block w-full text-left px-4 py-2 hover:bg-surfaceHover text-sm">ISO Install Lab (Linux)</button>
                         <button onClick={() => loadPreset('sl1-2-smart-home-pv')} className="block w-full text-left px-4 py-2 hover:bg-surfaceHover text-sm">Smart Home PV (SL1-2)</button>
                         <button onClick={() => loadPreset('sl1-2-smart-home-pv-3vm')} className="block w-full text-left px-4 py-2 hover:bg-surfaceHover text-sm">Smart Home PV (SL1-2) - 3 VMs</button>
+                        <button onClick={() => loadPreset('sl1-2-red-green-blue')} className="block w-full text-left px-4 py-2 hover:bg-surfaceHover text-sm">SL1-2: Red/Green/Blue (3 VMs)</button>
                         <button onClick={() => loadPreset('attacker-victim')} className="block w-full text-left px-4 py-2 hover:bg-surfaceHover text-sm">Attacker vs Victim (Linux)</button>
                     </div>
                 </div>

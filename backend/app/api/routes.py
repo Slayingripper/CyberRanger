@@ -17,6 +17,83 @@ import xml.etree.ElementTree as ET
 
 router = APIRouter()
 
+TOPOLOGY_CACHE_FILE = os.path.join(WORK_DIR, "topology_cache.json")
+DEPLOYMENTS_FILE = os.path.join(WORK_DIR, "deployments.json")
+
+def _load_topology_cache():
+    if os.path.exists(TOPOLOGY_CACHE_FILE):
+        try:
+            with open(TOPOLOGY_CACHE_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return None
+    return None
+
+def _save_topology_cache(data):
+    with open(TOPOLOGY_CACHE_FILE, "w") as f:
+        json.dump(data, f)
+
+def _load_deployments():
+    if os.path.exists(DEPLOYMENTS_FILE):
+        try:
+            with open(DEPLOYMENTS_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def _save_deployments(data):
+    with open(DEPLOYMENTS_FILE, "w") as f:
+        json.dump(data, f)
+
+@router.get("/topology/cache")
+async def get_topology_cache():
+    data = _load_topology_cache()
+    if data:
+        return data
+    return {}
+
+@router.post("/topology/cache")
+async def save_topology_cache(topology: Dict[str, Any]):
+    _save_topology_cache(topology)
+    return {"status": "cached"}
+
+@router.get("/deployments")
+async def get_deployments():
+    deployments = _load_deployments()
+    
+    # Auto-cleanup: remove deployments that have no VMs present in the system
+    # We do not want to remove just stopped VMs, but VMs that are completely deleted.
+    # vm_manager.list_domains() returns all active and inactive (defined) domains.
+    try:
+        current_vms = {vm['name'] for vm in vm_manager.list_domains()}
+    except Exception:
+        # If we can't list domains, return as-is to avoid data loss
+        return deployments
+
+    ids_to_remove = []
+    
+    for dep_id, dep in deployments.items():
+        # Check if any of the deployment's VMs still exist
+        dep_vms = dep.get("vms", [])
+        if not dep_vms:
+             # Empty deployment record?
+             ids_to_remove.append(dep_id)
+             continue
+             
+        # Check if *any* of the VMs belonging to this deployment currently exist
+        any_vm_exists = any(vm_name in current_vms for vm_name in dep_vms)
+        
+        if not any_vm_exists:
+            ids_to_remove.append(dep_id)
+    
+    if ids_to_remove:
+        for dep_id in ids_to_remove:
+            del deployments[dep_id]
+        _save_deployments(deployments)
+            
+    return deployments
+
 # In-memory cache for last topology (best-effort; resets on restart)
 _TOPOLOGY_CACHE: Dict[str, Any] = {}
 _TOPOLOGY_CACHE_TS: Optional[float] = None
@@ -363,12 +440,19 @@ class TopologyNodeConfig(BaseModel):
     # Optional automation hooks for ISO installs (e.g., send keys/text).
     automation: Optional[Dict[str, Any]] = None
 
+class Position(BaseModel):
+    x: float
+    y: float
+
 class TopologyNode(BaseModel):
     id: str
     label: str
     config: TopologyNodeConfig
+    # Optional position for visualization restoration
+    position: Optional[Position] = None
 
 class TopologyEdge(BaseModel):
+    id: Optional[str] = None
     source: str
     target: str
 
@@ -796,6 +880,27 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest):
             else:
                 await set_progress_path(job_id, f"nodes.{node.id}.status", "error")
                 await set_progress_path(job_id, f"nodes.{node.id}.message", res.get("message") or "failed")
+
+        # Save deployment record
+        try:
+            deployments = _load_deployments()
+            vm_names = []
+            for node in topology.nodes:
+                 safe_name = "".join(c for c in node.label if c.isalnum() or c in ('-', '_')).strip()
+                 if not safe_name:
+                     safe_name = f"vm_{node.id}"
+                 vm_names.append(f"{safe_name}_{node.id}")
+            
+            deployments[job_id] = {
+                "id": job_id,
+                "name": topology.scenario.name if topology.scenario and topology.scenario.name else "Custom Deployment",
+                "timestamp": time.time(),
+                "vms": vm_names,
+                "topology": topology.dict()
+            }
+            _save_deployments(deployments)
+        except Exception as e:
+            print(f"Failed to save deployment record: {e}")
 
         await update_job(
             job_id,

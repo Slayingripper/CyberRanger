@@ -220,162 +220,169 @@ class VMManager:
         network_name: str = "default",
         network_names: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        if not self.conn:
-            self.connect()
-        if not self.conn:
-            return {"status": "error", "message": "No libvirt connection"}
+                if not self.conn:
+                        self.connect()
+                if not self.conn:
+                        return {"status": "error", "message": "No libvirt connection"}
 
-        try:
-            existing = self.conn.lookupByName(name)
-            if existing is not None:
-                if existing.isActive():
-                    existing.destroy()
-                existing.undefineFlags(0)
-        except libvirt.libvirtError:
-            pass
+                try:
+                        existing = self.conn.lookupByName(name)
+                        if existing is not None:
+                                if existing.isActive():
+                                        existing.destroy()
+                                existing.undefineFlags(0)
+                except libvirt.libvirtError:
+                        pass
 
-        disk_xml = ""
-        boot_dev = "hd"
-        machine_type = "pc-q35-6.2"
+                disk_xml = ""
+                boot_dev = "hd"
+                machine_type = "pc-q35-6.2"
 
-        if iso_path:
-            machine_type = "pc-i440fx-6.2"
-            disk_filename = f"{name}.qcow2"
-            container_disk_path = os.path.join(WORK_DIR, "disks", disk_filename)
-            host_disk_path = os.path.join(HOST_WORK_DIR, "disks", disk_filename)
-            disk_size = "20G"
-            try:
-                iso_base = os.path.basename(iso_path).lower()
-                if "securityonion" in iso_base or "security-onion" in iso_base:
-                    disk_size = "200G"
-            except Exception:
-                pass
-            subprocess.run(["qemu-img", "create", "-f", "qcow2", container_disk_path, disk_size], check=True)
-            disk_xml = f"""
-            <disk type='file' device='disk'>
-              <driver name='qemu' type='qcow2'/>
-              <source file='{host_disk_path}'/>
-              <target dev='vda' bus='virtio'/>
-            </disk>
-            <disk type='file' device='cdrom'>
-              <driver name='qemu' type='raw'/>
-              <source file='{iso_path}'/>
-              <target dev='hdc' bus='ide'/>
-              <readonly/>
-            </disk>
-            """
-            boot_dev = "cdrom"
-        elif image_path:
-            disk_filename = f"{name}.qcow2"
-            container_disk_path = os.path.join(WORK_DIR, "disks", disk_filename)
-            host_disk_path = os.path.join(HOST_WORK_DIR, "disks", disk_filename)
-            container_base_image = image_path.replace(HOST_WORK_DIR, WORK_DIR)
-            if not os.path.exists(container_base_image):
-                raise FileNotFoundError(
-                    f"Base image not found: {container_base_image}. Place it under {os.path.join(WORK_DIR, 'images')}"
-                )
-            try:
-                info = subprocess.check_output(["qemu-img", "info", "--output=json", container_base_image], text=True)
-                base_format = json.loads(info).get("format") or "qcow2"
-            except Exception as e:
-                raise RuntimeError(f"Failed to inspect base image with qemu-img: {container_base_image}: {e}")
-            subprocess.run(
-                ["qemu-img", "create", "-f", "qcow2", "-F", base_format, "-b", container_base_image, container_disk_path],
-                check=True,
-            )
-            host_base_image = os.path.join(HOST_WORK_DIR, "images", os.path.basename(container_base_image))
-            subprocess.run(["qemu-img", "rebase", "-u", "-F", base_format, "-b", host_base_image, container_disk_path], check=True)
-            disk_xml = f"""
-            <disk type='file' device='disk'>
-              <driver name='qemu' type='qcow2'/>
-              <source file='{host_disk_path}'/>
-              <target dev='vda' bus='virtio'/>
-            </disk>
-            """
-            if cloud_init:
-                user_data = f"""#cloud-config
+                if iso_path:
+                        machine_type = "pc-i440fx-6.2"
+                        disk_filename = f"{name}.qcow2"
+                        container_disk_path = os.path.join(WORK_DIR, "disks", disk_filename)
+                        host_disk_path = os.path.join(HOST_WORK_DIR, "disks", disk_filename)
+                        disk_size = "20G"
+                        try:
+                                iso_base = os.path.basename(iso_path).lower()
+                                if "securityonion" in iso_base or "security-onion" in iso_base:
+                                        disk_size = "200G"
+                        except Exception:
+                                pass
+                        subprocess.run(["qemu-img", "create", "-f", "qcow2", container_disk_path, disk_size], check=True)
+                        disk_xml = f"""
+                        <disk type='file' device='disk'>
+                            <driver name='qemu' type='qcow2'/>
+                            <source file='{host_disk_path}'/>
+                            <target dev='vda' bus='virtio'/>
+                        </disk>
+                        <disk type='file' device='cdrom'>
+                            <driver name='qemu' type='raw'/>
+                            <source file='{iso_path}'/>
+                            <target dev='hdc' bus='ide'/>
+                            <readonly/>
+                        </disk>
+                        """
+                        boot_dev = "cdrom"
+                elif image_path:
+                        disk_filename = f"{name}.qcow2"
+                        container_disk_path = os.path.join(WORK_DIR, "disks", disk_filename)
+                        host_disk_path = os.path.join(HOST_WORK_DIR, "disks", disk_filename)
+                        container_base_image = image_path.replace(HOST_WORK_DIR, WORK_DIR)
+                        if not os.path.exists(container_base_image):
+                                raise FileNotFoundError(
+                                        f"Base image not found: {container_base_image}. Place it under {os.path.join(WORK_DIR, 'images')}"
+                                )
+                        try:
+                                info = subprocess.check_output(["qemu-img", "info", "--output=json", container_base_image], text=True)
+                                base_format = json.loads(info).get("format") or "qcow2"
+                        except Exception as e:
+                                raise RuntimeError(f"Failed to inspect base image with qemu-img: {container_base_image}: {e}")
+                        subprocess.run(
+                                ["qemu-img", "create", "-f", "qcow2", "-F", base_format, "-b", container_base_image, container_disk_path],
+                                check=True,
+                        )
+                        host_base_image = os.path.join(HOST_WORK_DIR, "images", os.path.basename(container_base_image))
+                        subprocess.run(
+                                ["qemu-img", "rebase", "-u", "-F", base_format, "-b", host_base_image, container_disk_path],
+                                check=True,
+                        )
+                        disk_xml = f"""
+                        <disk type='file' device='disk'>
+                            <driver name='qemu' type='qcow2'/>
+                            <source file='{host_disk_path}'/>
+                            <target dev='vda' bus='virtio'/>
+                        </disk>
+                        """
+                        if cloud_init:
+                                user_data = f"""#cloud-config
 hostname: {name}
 manage_etc_hosts: true
+apt_update: true
+apt_upgrade: false
 users:
-  - name: {cloud_init.get('username', 'user')}
-    passwd: {cloud_init.get('password', 'password')}
-    groups: users, admin
-    sudo: ALL=(ALL) NOPASSWD:ALL
-    shell: /bin/bash
-    lock_passwd: false
+    - name: {cloud_init.get('username', 'user')}
+        passwd: {cloud_init.get('password', 'password')}
+        groups: users, admin
+        sudo: ALL=(ALL) NOPASSWD:ALL
+        shell: /bin/bash
+        lock_passwd: false
 ssh_pwauth: true
+chpasswd:
+    expire: false
+    list: |
+        {cloud_init.get('username', 'user')}:{cloud_init.get('password', 'password')}
 packages:
 {cloud_init.get('packages', '')}
 runcmd:
 {chr(10).join([f"  - {cmd}" for cmd in cloud_init.get('runcmd', [])])}
-  - echo "Cloud-init finished"
+    - echo "Cloud-init finished"
 """
-                meta_data = f"instance-id: {name}\nlocal-hostname: {name}"
-                cidata_iso = self.create_cloud_init_iso(name, user_data, meta_data)
-                disk_xml += f"""
-                <disk type='file' device='cdrom'>
-                  <driver name='qemu' type='raw'/>
-                  <source file='{cidata_iso}'/>
-                  <target dev='sdb' bus='sata'/>
-                  <readonly/>
-                </disk>
+                                meta_data = f"instance-id: {name}\nlocal-hostname: {name}"
+                                cidata_iso = self.create_cloud_init_iso(name, user_data, meta_data)
+                                disk_xml += f"""
+                                <disk type='file' device='cdrom'>
+                                    <driver name='qemu' type='raw'/>
+                                    <source file='{cidata_iso}'/>
+                                    <target dev='sdb' bus='sata'/>
+                                    <readonly/>
+                                </disk>
+                                """
+
+                nets = [str(n) for n in (network_names or [network_name]) if n]
+                if not nets:
+                        nets = ["default"]
+                interfaces_xml = "\n".join([
+                        f"""
+                        <interface type='network'>
+                            <source network='{n}'/>
+                            <model type='virtio'/>
+                        </interface>
+                        """.rstrip()
+                        for n in nets
+                ])
+
+                xml = f"""
+                <domain type='kvm'>
+                    <name>{name}</name>
+                    <memory unit='KiB'>{memory_mb * 1024}</memory>
+                    <vcpu placement='static'>{vcpus}</vcpu>
+                    <cpu mode='host-passthrough' check='none'/>
+                    <os>
+                        <type arch='x86_64' machine='{machine_type}'>hvm</type>
+                        <boot dev='{boot_dev}'/>
+                        <boot dev='hd'/>
+                    </os>
+                    <features>
+                        <acpi/>
+                        <apic/>
+                    </features>
+                    <devices>
+                        <emulator>/usr/bin/qemu-system-x86_64</emulator>
+                        {disk_xml}
+                        {interfaces_xml}
+                        <graphics type='vnc' port='-1' autoport='yes' listen='0.0.0.0'>
+                            <listen type='address' address='0.0.0.0'/>
+                        </graphics>
+                        <video>
+                            <model type='virtio' heads='1' primary='yes'/>
+                        </video>
+                    </devices>
+                </domain>
                 """
-
-        nets = [str(n) for n in (network_names or [network_name]) if n]
-        if not nets:
-            nets = ["default"]
-        interfaces_xml = "\n".join([
-            f"""
-            <interface type='network'>
-              <source network='{n}'/>
-              <model type='virtio'/>
-            </interface>
-            """.rstrip()
-            for n in nets
-        ])
-
-        xml = f"""
-        <domain type='kvm'>
-          <name>{name}</name>
-          <memory unit='KiB'>{memory_mb * 1024}</memory>
-          <vcpu placement='static'>{vcpus}</vcpu>
-          <cpu mode='host-passthrough' check='none'/>
-          <os>
-            <type arch='x86_64' machine='{machine_type}'>hvm</type>
-            <boot dev='{boot_dev}'/>
-            <boot dev='hd'/>
-          </os>
-          <features>
-            <acpi/>
-            <apic/>
-          </features>
-          <devices>
-            <emulator>/usr/bin/qemu-system-x86_64</emulator>
-            {disk_xml}
-            {interfaces_xml}
-            <graphics type='vnc' port='-1' autoport='yes' listen='0.0.0.0'>
-              <listen type='address' address='0.0.0.0'/>
-            </graphics>
-            <video>
-              <model type='virtio' heads='1' primary='yes'/>
-            </video>
-          </devices>
-        </domain>
-        """
-        try:
-            dom = self.conn.defineXML(xml)
-            if dom:
-                dom.create()
-                # Try to start console streaming in background if possible
                 try:
-                    # No definition context here; caller may start stream by calling start_console_stream
-                    pass
-                except Exception:
-                    pass
-                return {"status": "success", "uuid": dom.UUIDString()}
-        except libvirt.libvirtError as e:
-            return {"status": "error", "message": str(e)}
-        return {"status": "error", "message": "Unknown error"}
+                        dom = self.conn.defineXML(xml)
+                        if dom:
+                                dom.create()
+                                try:
+                                        pass
+                                except Exception:
+                                        pass
+                                return {"status": "success", "uuid": dom.UUIDString()}
+                except libvirt.libvirtError as e:
+                        return {"status": "error", "message": str(e)}
+                return {"status": "error", "message": "Unknown error"}
 
     def start_console_stream(self, vm_name: str, definition_id: str, level_idx: int):
         """Start background thread that reads the domain's console and publishes events via event_bus."""

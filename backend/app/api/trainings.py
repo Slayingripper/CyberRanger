@@ -1,11 +1,13 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
+import base64
 import json
 import yaml
 import os
 import uuid
 from app.core.vm_manager import WORK_DIR, vm_manager
+from app.core.image_manager import ensure_image
 from app.core.event_bus import event_bus
 import time
 
@@ -13,6 +15,59 @@ router = APIRouter()
 
 TRAININGS_DIR = os.path.join(WORK_DIR, "trainings")
 os.makedirs(TRAININGS_DIR, exist_ok=True)
+
+
+def _build_cloud_init_assets(assets: List[Dict[str, Any]]) -> Tuple[List[str], List[str]]:
+    packages: List[str] = []
+    runcmds: List[str] = []
+
+    for asset in assets or []:
+        atype = asset.get("type")
+        if atype == "package":
+            val = asset.get("value")
+            if val:
+                packages.append(str(val))
+        elif atype == "command":
+            val = asset.get("value")
+            if val:
+                runcmds.append(str(val))
+        elif atype == "ansible":
+            playbook = asset.get("playbook")
+            if not playbook:
+                continue
+            playbook_name = asset.get("playbook_name") or "playbook.yml"
+            extra_vars = asset.get("extra_vars")
+            install_ansible = asset.get("install", True)
+
+            if install_ansible:
+                packages.append("ansible")
+
+            b64 = base64.b64encode(str(playbook).encode("utf-8")).decode("ascii")
+            runcmds.append(f"printf '%s' '{b64}' | base64 -d > /tmp/{playbook_name}")
+
+            cmd = f"ansible-playbook -c local -i localhost, /tmp/{playbook_name}"
+            if isinstance(extra_vars, dict) and extra_vars:
+                cmd += f" --extra-vars '{json.dumps(extra_vars)}'"
+            runcmds.append(cmd)
+
+    return packages, runcmds
+
+
+def _resolve_training_image_path(image_key: str) -> str:
+    images_dir = os.path.join(WORK_DIR, "images")
+    image_map = {
+        "ubuntu-20.04": "focal-server-cloudimg-amd64.img",
+        "kali-linux": "kali-linux-2025.4-qemu-amd64.qcow2",
+    }
+
+    if image_key.endswith(".qcow2") or image_key.endswith(".img") or image_key.endswith(".iso"):
+        return os.path.join(images_dir, image_key)
+
+    mapped = image_map.get(image_key)
+    if mapped:
+        return os.path.join(images_dir, mapped)
+
+    return os.path.join(images_dir, f"{image_key}.qcow2")
 
 class Task(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -109,6 +164,7 @@ async def deploy_level(training_id: str, level_idx: int):
         raise HTTPException(status_code=400, detail="No topology defined for this level")
     
     topology = level['topology']
+    sources = training.get("sources") or {}
     vms = topology.get('vms', [])
     results = []
     
@@ -118,9 +174,28 @@ async def deploy_level(training_id: str, level_idx: int):
         name = f"t{training_id[:8]}_l{level_idx}_{safe_name}"
         
         image = vm_conf.get('image')
-        image_path = None
+        image_path: Optional[str] = None
         if image:
-             image_path = os.path.join(WORK_DIR, "images", image)
+            src = sources.get(image) or sources.get(os.path.basename(str(image)))
+            if src:
+                ensured = await ensure_image(src)
+                image_path = ensured.container_path
+            else:
+                image_path = _resolve_training_image_path(str(image))
+
+        cloud_init = None
+        if isinstance(vm_conf.get("cloud_init"), dict):
+            cloud_init = vm_conf.get("cloud_init")
+        else:
+            packages, runcmds = _build_cloud_init_assets(vm_conf.get("assets") or [])
+            if packages or runcmds:
+                packages_str = "\n".join([f"  - {p}" for p in packages])
+                cloud_init = {
+                    "username": "user",
+                    "password": "password",
+                    "packages": packages_str,
+                    "runcmd": runcmds,
+                }
              
         try:
             res = vm_manager.create_vm(
@@ -128,6 +203,7 @@ async def deploy_level(training_id: str, level_idx: int):
                 memory_mb=int(vm_conf.get('memory', 1024)),
                 vcpus=int(vm_conf.get('vcpus', 1)),
                 image_path=image_path,
+                cloud_init=cloud_init,
                 network_name="default"
             )
             results.append({"name": name, "status": "created", "details": res})

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, WebSocket
 import asyncio
 import logging
+from typing import Set
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -12,8 +13,12 @@ async def vnc_proxy(websocket: WebSocket, port: int):
         # VNC servers bound to localhost
         reader, writer = await asyncio.open_connection("127.0.0.1", port)
     except Exception as e:
-        print(f"Failed to connect to VNC on port {port}: {e}")
-        await websocket.close()
+        logger.exception("Failed to connect to VNC on port %s", port)
+        try:
+            await websocket.close()
+        except RuntimeError:
+            # already closed
+            pass
         return
 
     async def copy_from_ws():
@@ -23,9 +28,14 @@ async def vnc_proxy(websocket: WebSocket, port: int):
                 writer.write(message)
                 await writer.drain()
         except Exception:
+            # remote closed or error reading from websocket/tcp
             pass
         finally:
-            writer.close()
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
 
     async def copy_from_tcp():
         try:
@@ -35,8 +45,36 @@ async def vnc_proxy(websocket: WebSocket, port: int):
                     break
                 await websocket.send_bytes(data)
         except Exception:
+            # remote closed or error
             pass
-        finally:
-            await websocket.close()
 
-    await asyncio.gather(copy_from_ws(), copy_from_tcp())
+    # Run both loops and stop when one completes, cancelling the other.
+    ws_task = asyncio.create_task(copy_from_ws())
+    tcp_task = asyncio.create_task(copy_from_tcp())
+
+    done, pending = await asyncio.wait({ws_task, tcp_task}, return_when=asyncio.FIRST_COMPLETED)
+
+    # Cancel any pending task and await cancellation
+    for task in pending:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
+    # Close resources once and guard against double-close errors
+    try:
+        writer.close()
+        await writer.wait_closed()
+    except Exception:
+        pass
+
+    try:
+        await websocket.close()
+    except RuntimeError:
+        # websocket already closed or response completed
+        pass
+    except Exception:
+        pass
