@@ -1,10 +1,11 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
 from pydantic import BaseModel
-from typing import List
+from typing import Any, Dict, List, Optional
 import uuid
 import os
 import aiofiles
-import httpx
+
+from app.core.image_manager import ensure_image, normalize_source_spec
 
 router = APIRouter()
 
@@ -38,7 +39,11 @@ class ImageResponse(BaseModel):
 
 class DownloadRequest(BaseModel):
     url: str
-    filename: str
+    filename: Optional[str] = None
+    min_bytes: Optional[int] = None
+    sha256: Optional[str] = None
+    archive_sha256: Optional[str] = None
+    extract: Optional[Dict[str, Any]] = None
 
 class DownloadStatus(BaseModel):
     task_id: str
@@ -47,6 +52,7 @@ class DownloadStatus(BaseModel):
     total: int
     current: int
     filename: str
+    error: Optional[str] = None
 
 @router.get("/images", response_model=List[ImageResponse])
 async def list_images():
@@ -67,7 +73,10 @@ async def list_images():
 
 @router.post("/images/upload")
 async def upload_image(file: UploadFile = File(...)):
-    file_path = os.path.join(IMAGES_DIR, file.filename)
+    safe_name = os.path.basename(file.filename or "")
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="A filename is required")
+    file_path = os.path.join(IMAGES_DIR, safe_name)
     try:
         async with aiofiles.open(file_path, 'wb') as out_file:
             while content := await file.read(1024 * 1024):  # Read in 1MB chunks
@@ -75,46 +84,51 @@ async def upload_image(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     
-    return {"filename": file.filename, "status": "uploaded"}
+    return {"filename": safe_name, "status": "uploaded"}
 
-async def download_file_task(url: str, filename: str, task_id: str):
-    file_path = os.path.join(IMAGES_DIR, filename)
+async def download_file_task(request_data: Dict[str, Any], task_id: str):
     download_tasks[task_id] = {
         "status": "downloading",
         "progress": 0,
         "total": 0,
         "current": 0,
-        "filename": filename
+        "filename": request_data.get("filename") or ""
     }
-    
+
     try:
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            async with client.stream('GET', url) as response:
-                response.raise_for_status()
-                total_size = int(response.headers.get('content-length', 0))
-                download_tasks[task_id]["total"] = total_size
-                
-                downloaded = 0
-                async with aiofiles.open(file_path, 'wb') as out_file:
-                    async for chunk in response.aiter_bytes():
-                        await out_file.write(chunk)
-                        downloaded += len(chunk)
-                        download_tasks[task_id]["current"] = downloaded
-                        if total_size > 0:
-                            download_tasks[task_id]["progress"] = int((downloaded / total_size) * 100)
-                            
+        source = normalize_source_spec(request_data)
+        final_name = source.get("extract", {}).get("output_filename") if source.get("extract") else None
+        download_tasks[task_id]["filename"] = final_name or source["filename"]
+
+        def _progress_cb(event: Dict[str, Any]):
+            total = int(event.get("total") or download_tasks[task_id].get("total") or 0)
+            current = int(event.get("current") or download_tasks[task_id].get("current") or 0)
+            final_display_name = event.get("final_name") or event.get("filename") or download_tasks[task_id].get("filename") or ""
+            download_tasks[task_id]["filename"] = final_display_name
+            download_tasks[task_id]["total"] = total
+            download_tasks[task_id]["current"] = current
+            download_tasks[task_id]["progress"] = int((current / total) * 100) if total > 0 else download_tasks[task_id].get("progress", 0)
+            if event.get("type") == "extract_start":
+                download_tasks[task_id]["status"] = "extracting"
+            elif event.get("type") == "extract_complete":
+                download_tasks[task_id]["status"] = "completed"
+                download_tasks[task_id]["progress"] = 100
+            elif event.get("type") == "download_complete":
+                download_tasks[task_id]["status"] = "downloaded"
+
+        await ensure_image(source, progress_cb=_progress_cb)
         download_tasks[task_id]["status"] = "completed"
         download_tasks[task_id]["progress"] = 100
     except Exception as e:
-        print(f"Download failed: {e}")
         download_tasks[task_id]["status"] = "failed"
         download_tasks[task_id]["error"] = str(e)
 
 @router.post("/images/download")
 async def download_image(request: DownloadRequest, background_tasks: BackgroundTasks):
     task_id = str(uuid.uuid4())
-    background_tasks.add_task(download_file_task, request.url, request.filename, task_id)
-    return {"status": "download_started", "filename": request.filename, "task_id": task_id}
+    payload = request.model_dump(exclude_none=True)
+    background_tasks.add_task(download_file_task, payload, task_id)
+    return {"status": "download_started", "filename": request.filename or os.path.basename(request.url), "task_id": task_id}
 
 @router.get("/images/download/{task_id}", response_model=DownloadStatus)
 async def get_download_status(task_id: str):

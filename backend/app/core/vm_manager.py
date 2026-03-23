@@ -697,5 +697,33 @@ runcmd:
                 continue
         return ok
 
+    def send_key(self, vm_name: str, key_name: str, holdtime_ms: int = 30) -> bool:
+        if not self.conn:
+            self.connect()
+        if not self.conn:
+            return False
+        try:
+            dom = self.conn.lookupByName(vm_name)
+        except libvirt.libvirtError:
+            return False
+
+        keycodes = {
+            "enter": [28],
+            "return": [28],
+            "tab": [15],
+            "esc": [1],
+            "escape": [1],
+            "space": [57],
+            "up": [103],
+            "down": [108],
+            "left": [105],
+            "right": [106],
+            "backspace": [14],
+        }
+        codes = keycodes.get(str(key_name or "").strip().lower())
+        if not codes:
+            return False
+        return self._send_keycodes(dom, codes, holdtime_ms)
+
 
 vm_manager = VMManager()

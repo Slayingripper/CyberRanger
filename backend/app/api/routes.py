@@ -1,16 +1,17 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any
 from app.core.vm_manager import vm_manager, WORK_DIR
 import os
 import glob
-import base64
 import json
 from app.core.image_manager import ensure_image
 import asyncio
 import time
 import hashlib
 import uuid
+from app.core.deploy_automation import execute_automation_steps, normalize_automation_steps
+from app.core.provisioning import build_cloud_init_from_assets, cloud_init_credentials
 
 from app.core.deploy_jobs import new_job, get_job, update_job, update_progress, set_progress_path
 import xml.etree.ElementTree as ET
@@ -202,42 +203,6 @@ def _slugify(value: str) -> str:
     s = "".join((c.lower() if c.isalnum() else "-") for c in (value or ""))
     s = "-".join([p for p in s.split("-") if p])
     return s or "topology"
-
-
-def _build_cloud_init_assets(assets: List[Dict[str, Any]]) -> Tuple[List[str], List[str]]:
-    packages: List[str] = []
-    runcmds: List[str] = []
-
-    for asset in assets or []:
-        atype = asset.get("type")
-        if atype == "package":
-            val = asset.get("value")
-            if val:
-                packages.append(str(val))
-        elif atype == "command":
-            val = asset.get("value")
-            if val:
-                runcmds.append(str(val))
-        elif atype == "ansible":
-            playbook = asset.get("playbook")
-            if not playbook:
-                continue
-            playbook_name = asset.get("playbook_name") or "playbook.yml"
-            extra_vars = asset.get("extra_vars")
-            install_ansible = asset.get("install", True)
-
-            if install_ansible:
-                packages.append("ansible")
-
-            b64 = base64.b64encode(str(playbook).encode("utf-8")).decode("ascii")
-            runcmds.append(f"printf '%s' '{b64}' | base64 -d > /tmp/{playbook_name}")
-
-            cmd = f"ansible-playbook -c local -i localhost, /tmp/{playbook_name}"
-            if isinstance(extra_vars, dict) and extra_vars:
-                cmd += f" --extra-vars '{json.dumps(extra_vars)}'"
-            runcmds.append(cmd)
-
-    return packages, runcmds
 
 
 def _connected_components(node_ids: List[str], edges: List[Any]) -> Dict[str, int]:
@@ -538,15 +503,7 @@ async def deploy_topology(topology: TopologyDeployRequest):
                     raise HTTPException(status_code=500, detail=f"Failed to create network {net_name}")
 
     for node in topology.nodes:
-        packages, runcmds = _build_cloud_init_assets(node.config.assets)
-        packages_str = "\n".join([f"  - {p}" for p in packages])
-        
-        cloud_init = {
-            "username": "user",
-            "password": "password",
-            "packages": packages_str,
-            "runcmd": runcmds
-        }
+        cloud_init = build_cloud_init_from_assets(node.config.assets)
         
         # If scenario provides a source for this image, always ensure it (cached) so we don't
         # accidentally boot from an older/incorrect local file.
@@ -605,7 +562,7 @@ async def deploy_topology(topology: TopologyDeployRequest):
                 cloud_init=None if image_path.lower().endswith(".iso") else cloud_init,
                 network_names=nets,
             )
-            results.append(res)
+            results.append({**res, "node": node.label, "credentials": None if image_path.lower().endswith(".iso") else cloud_init_credentials(cloud_init)})
         except Exception as e:
             results.append({"status": "error", "message": str(e), "node": node.label})
             
@@ -779,36 +736,30 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest):
         await update_progress(job_id, {"phase": "vms"})
         await update_job(job_id, message="Creating virtual machines")
 
-        async def _schedule_send_text(vm_name: str, node_id: str, text: str, delay_seconds: float, retries: int, retry_delay_seconds: float):
-            await set_progress_path(job_id, f"nodes.{node_id}.automation.status", "scheduled")
-            await set_progress_path(job_id, f"nodes.{node_id}.automation.delay_seconds", delay_seconds)
-            await asyncio.sleep(max(0.0, delay_seconds))
-            for attempt in range(1, max(1, retries) + 1):
-                await set_progress_path(job_id, f"nodes.{node_id}.automation.status", f"sending ({attempt}/{max(1, retries)})")
-                ok = vm_manager.send_text(vm_name, text)
-                await set_progress_path(job_id, f"nodes.{node_id}.automation.last_ok", bool(ok))
-                if ok:
-                    await set_progress_path(job_id, f"nodes.{node_id}.automation.status", "sent")
-                    return
-                if attempt < max(1, retries):
-                    await asyncio.sleep(max(0.0, retry_delay_seconds))
-            await set_progress_path(job_id, f"nodes.{node_id}.automation.status", "failed")
+        async def _automation_progress(event: Dict[str, Any]):
+            node_id = event.get("node_id")
+            if not node_id:
+                return
+            status = event.get("status")
+            if status is not None:
+                await set_progress_path(job_id, f"nodes.{node_id}.automation.status", status)
+            if "step" in event:
+                await set_progress_path(job_id, f"nodes.{node_id}.automation.step", int(event["step"]))
+            if "step_type" in event:
+                await set_progress_path(job_id, f"nodes.{node_id}.automation.step_type", event["step_type"])
+            if "delay_seconds" in event:
+                await set_progress_path(job_id, f"nodes.{node_id}.automation.delay_seconds", float(event["delay_seconds"]))
+            if "ok" in event:
+                await set_progress_path(job_id, f"nodes.{node_id}.automation.last_ok", bool(event["ok"]))
+            if "message" in event:
+                await set_progress_path(job_id, f"nodes.{node_id}.automation.message", str(event["message"]))
+            if "key" in event:
+                await set_progress_path(job_id, f"nodes.{node_id}.automation.key", str(event["key"]))
 
         for node in topology.nodes:
             await set_progress_path(job_id, f"nodes.{node.id}.status", "creating")
 
-            # Build cloud-init from node assets (same as sync deploy)
-            packages = []
-            runcmds = []
-            packages, runcmds = _build_cloud_init_assets(node.config.assets)
-
-            packages_str = "\n".join([f"  - {p}" for p in packages])
-            cloud_init = {
-                "username": "user",
-                "password": "password",
-                "packages": packages_str,
-                "runcmd": runcmds
-            }
+            cloud_init = build_cloud_init_from_assets(node.config.assets)
 
             # Resolve/ensure image path
             image_path: Optional[str] = None
@@ -829,6 +780,17 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest):
                 await set_progress_path(job_id, f"nodes.{node.id}.message", msg)
                 results.append({"status": "error", "node": node.label, "message": msg})
                 continue
+
+            automation_steps = []
+            if isinstance(node.config.automation, dict):
+                try:
+                    automation_steps = normalize_automation_steps(node.config.automation)
+                except ValueError as e:
+                    msg = f"Invalid automation: {e}"
+                    await set_progress_path(job_id, f"nodes.{node.id}.status", "error")
+                    await set_progress_path(job_id, f"nodes.{node.id}.message", msg)
+                    results.append({"status": "error", "node": node.label, "message": msg})
+                    continue
 
             safe_name = "".join(c for c in node.label if c.isalnum() or c in ('-', '_')).strip()
             if not safe_name:
@@ -854,29 +816,25 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest):
                 cloud_init=None if image_path.lower().endswith(".iso") else cloud_init,
                 network_names=nets,
             )
-            results.append({**res, "node": node.label})
+            results.append({**res, "node": node.label, "credentials": None if image_path.lower().endswith(".iso") else cloud_init_credentials(cloud_init)})
             if res.get("status") == "success":
                 await set_progress_path(job_id, f"nodes.{node.id}.status", "running")
+                creds = cloud_init_credentials(cloud_init)
+                if creds:
+                    await set_progress_path(job_id, f"nodes.{node.id}.credentials.username", creds["username"])
+                    await set_progress_path(job_id, f"nodes.{node.id}.credentials.password", creds["password"])
 
-                # Optional automation for ISO installs (e.g., Security Onion prompt).
-                automation = node.config.automation or {}
-                if image_path.lower().endswith(".iso") and isinstance(automation, dict):
-                    if automation.get("type") == "send_text":
-                        text = str(automation.get("text") or "")
-                        if text:
-                            delay_seconds = float(automation.get("delay_seconds") or 45)
-                            retries = int(automation.get("retries") or 3)
-                            retry_delay_seconds = float(automation.get("retry_delay_seconds") or 15)
-                            asyncio.create_task(
-                                _schedule_send_text(
-                                    vm_name=f"{safe_name}_{node.id}",
-                                    node_id=node.id,
-                                    text=text,
-                                    delay_seconds=delay_seconds,
-                                    retries=retries,
-                                    retry_delay_seconds=retry_delay_seconds,
-                                )
-                            )
+                if image_path.lower().endswith(".iso") and automation_steps:
+                    asyncio.create_task(
+                        execute_automation_steps(
+                            vm_name=f"{safe_name}_{node.id}",
+                            node_id=node.id,
+                            steps=automation_steps,
+                            send_text=vm_manager.send_text,
+                            send_key=vm_manager.send_key,
+                            progress_cb=_automation_progress,
+                        )
+                    )
             else:
                 await set_progress_path(job_id, f"nodes.{node.id}.status", "error")
                 await set_progress_path(job_id, f"nodes.{node.id}.message", res.get("message") or "failed")

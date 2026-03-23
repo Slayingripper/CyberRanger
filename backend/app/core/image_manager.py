@@ -5,8 +5,10 @@ import importlib
 import subprocess
 import bz2
 import gzip
+import hashlib
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, Callable
+from urllib.parse import urlparse
 
 import httpx
 
@@ -37,6 +39,93 @@ def _safe_filename(name: str) -> str:
     return os.path.basename(name)
 
 
+def _normalize_min_bytes(value: Any, field_name: str) -> Optional[int]:
+    if value is None:
+        return None
+    parsed = int(value)
+    if parsed < 1:
+        raise ValueError(f"{field_name} must be >= 1")
+    return parsed
+
+
+def _normalize_sha256(value: Any, field_name: str) -> Optional[str]:
+    if value is None:
+        return None
+    digest = str(value).strip().lower()
+    if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+        raise ValueError(f"{field_name} must be a 64-character hex sha256 digest")
+    return digest
+
+
+def _allow_http_downloads() -> bool:
+    return str(os.environ.get("CYBERANGE_ALLOW_HTTP_DOWNLOADS", "0")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def normalize_source_spec(source: Any) -> Dict[str, Any]:
+    if isinstance(source, str):
+        raw: Dict[str, Any] = {"url": source}
+    elif isinstance(source, dict):
+        raw = dict(source)
+    else:
+        raise ValueError("invalid source type")
+
+    url = str(raw.get("url") or "").strip()
+    if not url:
+        raise ValueError("source.url is required")
+
+    parsed = urlparse(url)
+    allowed_schemes = {"https", "http"} if _allow_http_downloads() else {"https"}
+    if parsed.scheme.lower() not in allowed_schemes:
+        allowed = ", ".join(sorted(allowed_schemes))
+        raise ValueError(f"source.url must use one of: {allowed}")
+
+    filename = _safe_filename(str(raw.get("filename") or os.path.basename(parsed.path) or "").strip())
+    if not filename:
+        raise ValueError("could not determine filename")
+
+    normalized: Dict[str, Any] = {
+        "url": url,
+        "filename": filename,
+        "min_bytes": _normalize_min_bytes(raw.get("min_bytes"), "min_bytes"),
+        "sha256": _normalize_sha256(raw.get("sha256"), "sha256"),
+        "archive_sha256": _normalize_sha256(raw.get("archive_sha256"), "archive_sha256"),
+    }
+
+    extract = raw.get("extract")
+    if extract is not None:
+        if not isinstance(extract, dict):
+            raise ValueError("extract must be an object")
+        extract_type = str(extract.get("type") or "").strip().lower()
+        if extract_type not in {"7z", "bz2", "gz"}:
+            raise ValueError(f"unsupported extract type: {extract_type}")
+        output_filename = _safe_filename(str(extract.get("output_filename") or "").strip()) or None
+        normalized["extract"] = {
+            "type": extract_type,
+            "output_filename": output_filename,
+            "member_glob": extract.get("member_glob"),
+            "remove_archive": bool(extract.get("remove_archive", False)),
+            "min_bytes_output": _normalize_min_bytes(extract.get("min_bytes_output"), "extract.min_bytes_output"),
+            "min_bytes_archive": _normalize_min_bytes(extract.get("min_bytes_archive"), "extract.min_bytes_archive"),
+        }
+    else:
+        normalized["extract"] = None
+
+    return normalized
+
+
+def _file_matches_sha256(path: str, expected_sha256: Optional[str]) -> bool:
+    if not expected_sha256:
+        return True
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest() == expected_sha256
+
+
 async def ensure_image(source: Any, progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None) -> EnsureResult:
     """Ensure an image/ISO exists in WORK_DIR/images.
 
@@ -48,25 +137,13 @@ async def ensure_image(source: Any, progress_cb: Optional[Callable[[Dict[str, An
     If the file already exists, it is not downloaded again.
     """
 
-    extract: Optional[Dict[str, Any]] = None
-    min_bytes: Optional[int] = None
-
-    if isinstance(source, str):
-        url = source
-        filename = os.path.basename(url.split("?")[0])
-    elif isinstance(source, dict):
-        url = source.get("url")
-        if not url:
-            raise ValueError("source.url is required")
-        filename = source.get("filename") or os.path.basename(url.split("?")[0])
-        extract = source.get("extract")
-        min_bytes = source.get("min_bytes")
-    else:
-        raise ValueError("invalid source type")
-
-    filename = _safe_filename(filename)
-    if not filename:
-        raise ValueError("could not determine filename")
+    normalized = normalize_source_spec(source)
+    url = normalized["url"]
+    filename = normalized["filename"]
+    extract = normalized.get("extract")
+    min_bytes = normalized.get("min_bytes")
+    final_sha256 = normalized.get("sha256")
+    archive_sha256 = normalized.get("archive_sha256")
 
     output_filename: Optional[str] = None
     extract_type: Optional[str] = None
@@ -77,8 +154,6 @@ async def ensure_image(source: Any, progress_cb: Optional[Callable[[Dict[str, An
 
     if extract:
         extract_type = extract.get("type")
-        if extract_type not in ("7z", "bz2", "gz"):
-            raise ValueError(f"unsupported extract type: {extract_type}")
         output_filename = _safe_filename(extract.get("output_filename") or "") or None
         if not output_filename:
             # sensible default for Kali QEMU images
@@ -108,21 +183,24 @@ async def ensure_image(source: Any, progress_cb: Optional[Callable[[Dict[str, An
 
     lock = _lock_for(final_name)
     async with lock:
-        if os.path.exists(final_path) and os.path.getsize(final_path) >= required_final_bytes:
+        if os.path.exists(final_path) and os.path.getsize(final_path) >= required_final_bytes and _file_matches_sha256(final_path, final_sha256):
             return EnsureResult(filename=final_name, container_path=final_path)
 
-        # If an existing artifact is present but too small, remove it so we can re-fetch.
         if os.path.exists(final_path):
             try:
                 os.remove(final_path)
             except OSError:
                 pass
 
-        # If extraction is requested and we already have an archive, we can skip re-downloading.
+        if extract_type and os.path.exists(archive_path) and not _file_matches_sha256(archive_path, archive_sha256):
+            try:
+                os.remove(archive_path)
+            except OSError:
+                pass
+
         if extract_type and os.path.exists(archive_path) and os.path.getsize(archive_path) >= required_archive_bytes:
             tmp_path = None
         else:
-            # Download to temp file then atomic rename.
             tmp_dir = images_dir
             fd, tmp_path = tempfile.mkstemp(prefix=f".{filename}.", dir=tmp_dir)
             os.close(fd)
@@ -179,13 +257,21 @@ async def ensure_image(source: Any, progress_cb: Optional[Callable[[Dict[str, An
                                 }
                             )
 
-                # Save download to either the final path (no extraction) or archive path (extraction)
+                target_path = archive_path if extract_type else final_path
+                if not extract_type and not _file_matches_sha256(tmp_path, final_sha256):
+                    raise RuntimeError(f"downloaded file checksum mismatch for {final_name}")
+                if extract_type and not _file_matches_sha256(tmp_path, archive_sha256):
+                    raise RuntimeError(f"downloaded archive checksum mismatch for {filename}")
+
                 os.replace(tmp_path, archive_path if extract_type else final_path)
 
                 if not extract_type and os.path.getsize(final_path) < required_final_bytes:
                     raise RuntimeError(
                         f"downloaded file is smaller than expected: {final_name} ({os.path.getsize(final_path)} bytes < {required_final_bytes} bytes)"
                     )
+
+                if not extract_type and not _file_matches_sha256(final_path, final_sha256):
+                    raise RuntimeError(f"downloaded file checksum mismatch for {final_name}")
 
             if extract_type == "7z":
                 # Lazy import so we don't require py7zr unless used.
@@ -199,11 +285,13 @@ async def ensure_image(source: Any, progress_cb: Optional[Callable[[Dict[str, An
                         "or rebuild the backend container after updating requirements."
                     ) from e
 
-                if os.path.exists(final_path) and os.path.getsize(final_path) >= required_final_bytes:
+                if os.path.exists(final_path) and os.path.getsize(final_path) >= required_final_bytes and _file_matches_sha256(final_path, final_sha256):
                     return EnsureResult(filename=final_name, container_path=final_path)
 
                 if not os.path.exists(archive_path) or os.path.getsize(archive_path) < required_archive_bytes:
                     raise RuntimeError("archive missing or smaller than expected; cannot extract")
+                if not _file_matches_sha256(archive_path, archive_sha256):
+                    raise RuntimeError(f"archive checksum mismatch for {filename}")
 
                 extract_dir = tempfile.mkdtemp(prefix=f".extract.{final_name}.", dir=images_dir)
                 try:
@@ -286,15 +374,19 @@ async def ensure_image(source: Any, progress_cb: Optional[Callable[[Dict[str, An
                     raise RuntimeError(
                         f"extracted file is smaller than expected: {final_name} ({os.path.getsize(final_path)} bytes < {required_final_bytes} bytes)"
                     )
+                if not _file_matches_sha256(final_path, final_sha256):
+                    raise RuntimeError(f"extracted file checksum mismatch for {final_name}")
 
                 return EnsureResult(filename=final_name, container_path=final_path)
 
             if extract_type == "bz2":
-                if os.path.exists(final_path) and os.path.getsize(final_path) >= required_final_bytes:
+                if os.path.exists(final_path) and os.path.getsize(final_path) >= required_final_bytes and _file_matches_sha256(final_path, final_sha256):
                     return EnsureResult(filename=final_name, container_path=final_path)
 
                 if not os.path.exists(archive_path) or os.path.getsize(archive_path) < required_archive_bytes:
                     raise RuntimeError("archive missing or smaller than expected; cannot extract")
+                if not _file_matches_sha256(archive_path, archive_sha256):
+                    raise RuntimeError(f"archive checksum mismatch for {filename}")
 
                 if progress_cb:
                     progress_cb(
@@ -345,15 +437,19 @@ async def ensure_image(source: Any, progress_cb: Optional[Callable[[Dict[str, An
                     raise RuntimeError(
                         f"extracted file is smaller than expected: {final_name} ({os.path.getsize(final_path)} bytes < {required_final_bytes} bytes)"
                     )
+                if not _file_matches_sha256(final_path, final_sha256):
+                    raise RuntimeError(f"extracted file checksum mismatch for {final_name}")
 
                 return EnsureResult(filename=final_name, container_path=final_path)
 
             if extract_type == "gz":
-                if os.path.exists(final_path) and os.path.getsize(final_path) >= required_final_bytes:
+                if os.path.exists(final_path) and os.path.getsize(final_path) >= required_final_bytes and _file_matches_sha256(final_path, final_sha256):
                     return EnsureResult(filename=final_name, container_path=final_path)
 
                 if not os.path.exists(archive_path) or os.path.getsize(archive_path) < required_archive_bytes:
                     raise RuntimeError("archive missing or smaller than expected; cannot extract")
+                if not _file_matches_sha256(archive_path, archive_sha256):
+                    raise RuntimeError(f"archive checksum mismatch for {filename}")
 
                 if progress_cb:
                     progress_cb(
@@ -401,8 +497,13 @@ async def ensure_image(source: Any, progress_cb: Optional[Callable[[Dict[str, An
                     raise RuntimeError(
                         f"extracted file is smaller than expected: {final_name} ({os.path.getsize(final_path)} bytes < {required_final_bytes} bytes)"
                     )
+                if not _file_matches_sha256(final_path, final_sha256):
+                    raise RuntimeError(f"extracted file checksum mismatch for {final_name}")
 
                 return EnsureResult(filename=final_name, container_path=final_path)
+
+            if not _file_matches_sha256(final_path, final_sha256):
+                raise RuntimeError(f"downloaded file checksum mismatch for {final_name}")
 
             return EnsureResult(filename=final_name, container_path=final_path)
         except Exception:

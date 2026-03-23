@@ -1,7 +1,6 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any, Tuple
-import base64
+from typing import List, Optional, Dict, Any
 import json
 import yaml
 import os
@@ -9,48 +8,13 @@ import uuid
 from app.core.vm_manager import WORK_DIR, vm_manager
 from app.core.image_manager import ensure_image
 from app.core.event_bus import event_bus
+from app.core.provisioning import build_cloud_init_assets, build_cloud_init_from_assets, cloud_init_credentials, ensure_cloud_init_defaults
 import time
 
 router = APIRouter()
 
 TRAININGS_DIR = os.path.join(WORK_DIR, "trainings")
 os.makedirs(TRAININGS_DIR, exist_ok=True)
-
-
-def _build_cloud_init_assets(assets: List[Dict[str, Any]]) -> Tuple[List[str], List[str]]:
-    packages: List[str] = []
-    runcmds: List[str] = []
-
-    for asset in assets or []:
-        atype = asset.get("type")
-        if atype == "package":
-            val = asset.get("value")
-            if val:
-                packages.append(str(val))
-        elif atype == "command":
-            val = asset.get("value")
-            if val:
-                runcmds.append(str(val))
-        elif atype == "ansible":
-            playbook = asset.get("playbook")
-            if not playbook:
-                continue
-            playbook_name = asset.get("playbook_name") or "playbook.yml"
-            extra_vars = asset.get("extra_vars")
-            install_ansible = asset.get("install", True)
-
-            if install_ansible:
-                packages.append("ansible")
-
-            b64 = base64.b64encode(str(playbook).encode("utf-8")).decode("ascii")
-            runcmds.append(f"printf '%s' '{b64}' | base64 -d > /tmp/{playbook_name}")
-
-            cmd = f"ansible-playbook -c local -i localhost, /tmp/{playbook_name}"
-            if isinstance(extra_vars, dict) and extra_vars:
-                cmd += f" --extra-vars '{json.dumps(extra_vars)}'"
-            runcmds.append(cmd)
-
-    return packages, runcmds
 
 
 def _resolve_training_image_path(image_key: str) -> str:
@@ -185,17 +149,11 @@ async def deploy_level(training_id: str, level_idx: int):
 
         cloud_init = None
         if isinstance(vm_conf.get("cloud_init"), dict):
-            cloud_init = vm_conf.get("cloud_init")
+            cloud_init = ensure_cloud_init_defaults(vm_conf.get("cloud_init"))
         else:
-            packages, runcmds = _build_cloud_init_assets(vm_conf.get("assets") or [])
+            packages, runcmds = build_cloud_init_assets(vm_conf.get("assets") or [])
             if packages or runcmds:
-                packages_str = "\n".join([f"  - {p}" for p in packages])
-                cloud_init = {
-                    "username": "user",
-                    "password": "password",
-                    "packages": packages_str,
-                    "runcmd": runcmds,
-                }
+                cloud_init = build_cloud_init_from_assets(vm_conf.get("assets") or [])
              
         try:
             res = vm_manager.create_vm(
@@ -206,7 +164,7 @@ async def deploy_level(training_id: str, level_idx: int):
                 cloud_init=cloud_init,
                 network_name="default"
             )
-            results.append({"name": name, "status": "created", "details": res})
+            results.append({"name": name, "status": "created", "details": res, "credentials": cloud_init_credentials(cloud_init)})
             try:
                 # Start console streaming to EventBus for runs associated with this training/level
                 vm_manager.start_console_stream(name, training_id, level_idx)

@@ -38,10 +38,47 @@ A lightweight, scalable Cyber Range platform using QEMU/KVM and a modern web int
 - **Images**: Place images under `./images` (bind-mounted to `/app/images` in the backend). Scenarios can also auto-download images via `scenario.sources`.
 - **Frontend API URL**: `VITE_API_URL` (default: `http://localhost:8001/api`).
 - **Range Mapper**: set `RANGE_MAPPER_ENABLE=1` to allow scans.
+- **Secure Image Downloads**: `scenario.sources` and `/api/images/download` now support optional `sha256`, `archive_sha256`, `min_bytes`, and `extract` metadata. HTTPS is required by default; set `CYBERANGE_ALLOW_HTTP_DOWNLOADS=1` only for trusted internal mirrors.
+- **VM Credentials**: image-backed deployments now generate per-VM credentials by default instead of using the old shared `user/password` fallback. Override only if you intentionally want fixed credentials.
 - **OpenWrt Auto-Download (optional)**:
    - `OPENWRT_IMAGE_URL` (e.g. OpenWrt x86_64 `*.img.gz`)
    - `OPENWRT_IMAGE_FILENAME` (download filename)
    - `OPENWRT_IMAGE_OUTPUT` (extracted image name, default `openwrt.img`)
+
+### Scenario Source Example
+
+```yaml
+scenario:
+   name: "Security Onion ISO Install"
+   team: blue
+   objective: "Boot and auto-drive the installer"
+   difficulty: medium
+   sources:
+      security-onion:
+         url: https://download.securityonion.net/file/securityonion/securityonion-2.4.150.iso
+         filename: securityonion-2.4.150.iso
+         sha256: <final-iso-sha256>
+  
+nodes:
+   - id: so-1
+      label: Security Onion
+      config:
+         image: security-onion
+         cpu: 4
+         ram: 8192
+         assets: []
+         automation:
+            steps:
+               - type: wait
+                  delay_seconds: 60
+               - type: send_text
+                  text: "install\n"
+               - type: send_key
+                  key: enter
+                  repeat: 1
+```
+
+The deploy-job endpoint publishes generated credentials and ISO automation progress in its job status payload, which makes unattended installs and follow-on configuration easier to monitor.
 
 ## Documentation
 
