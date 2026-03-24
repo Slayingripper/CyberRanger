@@ -21,14 +21,14 @@ A lightweight, No B.S., scalable Cyber Range platform using QEMU/KVM.
 - Current user in `libvirt` and `kvm` groups (`sudo usermod -aG libvirt,kvm $USER`)
 
 ### Dashboard
-![Dashboard Screenshot](images/1.png)
+![Dashboard Screenshot](frontend/public/1.png)
 
 ## VM Image Management
-![Image Management Screenshot](images/2.png)
+![Image Management Screenshot](frontend/public/2.png)
 - Images are stored in `./images` on the host (bind-mounted to `/app/images
 - Scenarios can reference images by name (e.g. `image: ubuntu-2204`) or define sources for auto-downloading.
 ## Topology Builder
-![Topology Builder Screenshot](images/3.png)
+![Topology Builder Screenshot](frontend/public/3.png)
 - Drag-and-drop interface for designing network topologies.
 - Define node configurations, connections, and automation steps.
 - Supports multiple node types (e.g. servers, workstations, firewalls) with customizable resources.
@@ -36,7 +36,7 @@ A lightweight, No B.S., scalable Cyber Range platform using QEMU/KVM.
 - Real-time console access via NoVNC for each node.
 
 ## Training System
-![Training System Screenshot](images/4.png)
+![Training System Screenshot](frontend/public/4.png)
 - Create training courses with multiple scenarios.
 - Each scenario can have its own topology, objectives, and difficulty level.
 - Track learner progress and provide hints or solutions.
@@ -44,7 +44,7 @@ A lightweight, No B.S., scalable Cyber Range platform using QEMU/KVM.
 
 ### Training Course Example
 
-![Course Screenshot](images/5.png)
+![Course Screenshot](frontend/public/5.png)
 
 
 
