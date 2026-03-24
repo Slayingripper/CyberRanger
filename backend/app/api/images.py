@@ -130,6 +130,17 @@ async def download_image(request: DownloadRequest, background_tasks: BackgroundT
     background_tasks.add_task(download_file_task, payload, task_id)
     return {"status": "download_started", "filename": request.filename or os.path.basename(request.url), "task_id": task_id}
 
+@router.delete("/images/{image_name}")
+async def delete_image(image_name: str):
+    safe_name = os.path.basename(image_name)
+    if not safe_name or safe_name in (".", ".."):
+        raise HTTPException(status_code=400, detail="Invalid image name")
+    file_path = os.path.join(IMAGES_DIR, safe_name)
+    if not os.path.exists(file_path) or not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="Image not found")
+    os.remove(file_path)
+    return {"status": "deleted", "name": safe_name}
+
 @router.get("/images/download/{task_id}", response_model=DownloadStatus)
 async def get_download_status(task_id: str):
     if task_id not in download_tasks:

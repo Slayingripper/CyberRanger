@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Upload, Download, File, HardDrive } from 'lucide-react';
+import { Upload, Download, File, HardDrive, Trash2 } from 'lucide-react';
 import Modal from './Modal';
 import { getApiUrl } from '../lib/api';
 
@@ -13,6 +13,7 @@ export default function Images() {
   const [downloadName, setDownloadName] = useState('');
   const [activeDownloads, setActiveDownloads] = useState({});
   const [messageModal, setMessageModal] = useState({ isOpen: false, title: '', message: '', type: 'info' });
+  const [deleteConfirm, setDeleteConfirm] = useState({ isOpen: false, imageName: null });
 
   useEffect(() => {
     fetchImages();
@@ -79,6 +80,18 @@ export default function Images() {
       setMessageModal({ isOpen: true, title: 'Error', message: 'Upload failed', type: 'error' });
     } finally {
       setUploadProgress(null);
+    }
+  };
+
+  const handleDeleteImage = async () => {
+    if (!deleteConfirm.imageName) return;
+    try {
+      await axios.delete(`${API_URL}/images/${encodeURIComponent(deleteConfirm.imageName)}`);
+      fetchImages();
+      setDeleteConfirm({ isOpen: false, imageName: null });
+    } catch (e) {
+      setMessageModal({ isOpen: true, title: 'Error', message: 'Failed to delete image: ' + (e.response?.data?.detail || e.message), type: 'error' });
+      setDeleteConfirm({ isOpen: false, imageName: null });
     }
   };
 
@@ -249,6 +262,7 @@ export default function Images() {
               <th className="p-4">Name</th>
               <th className="p-4">Size</th>
               <th className="p-4">Path</th>
+              <th className="p-4 w-20">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-border">
@@ -260,16 +274,39 @@ export default function Images() {
                 </td>
                 <td className="p-4 text-primary">{(img.size / (1024 * 1024)).toFixed(2)} MB</td>
                 <td className="p-4 text-secondary text-sm font-mono">{img.host_path}</td>
+                <td className="p-4">
+                  <button
+                    onClick={() => setDeleteConfirm({ isOpen: true, imageName: img.name })}
+                    className="text-secondary hover:text-red-400 transition-colors"
+                    title="Delete image"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </td>
               </tr>
             ))}
             {images.length === 0 && (
               <tr>
-                <td colSpan="3" className="p-8 text-center text-secondary">No images found</td>
+                <td colSpan="4" className="p-8 text-center text-secondary">No images found</td>
               </tr>
             )}
           </tbody>
         </table>
       </div>
+
+      <Modal
+        isOpen={deleteConfirm.isOpen}
+        onClose={() => setDeleteConfirm({ isOpen: false, imageName: null })}
+        title="Delete Image"
+        footer={
+          <>
+            <button onClick={() => setDeleteConfirm({ isOpen: false, imageName: null })} className="px-4 py-2 text-secondary hover:text-primary">Cancel</button>
+            <button onClick={handleDeleteImage} className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded">Delete</button>
+          </>
+        }
+      >
+        <p className="text-secondary">Are you sure you want to delete <strong className="text-primary">{deleteConfirm.imageName}</strong>? This action cannot be undone.</p>
+      </Modal>
 
       <Modal
         isOpen={messageModal.isOpen}

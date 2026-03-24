@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { BookOpen, CheckCircle, Play, ChevronRight, Award, Plus, Edit, Trash2, Monitor, XCircle, Upload } from 'lucide-react';
+import { BookOpen, CheckCircle, Play, ChevronRight, Award, Plus, Edit, Trash2, Monitor, XCircle, Upload, Lightbulb } from 'lucide-react';
 import axios from 'axios';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import TrainingEditor from './TrainingEditor';
 import VNCViewer from './VNCViewer';
 import Modal from './Modal';
@@ -16,7 +18,10 @@ function Training() {
   const [deploying, setDeploying] = useState(false);
     const [runId, setRunId] = useState(null);
     const [runEvents, setRunEvents] = useState([]);
+    const [completedTasks, setCompletedTasks] = useState(new Set());
+    const [pendingNextLevel, setPendingNextLevel] = useState(null);
     const wsRef = useRef(null);
+    const wsReconnectTimer = useRef(null);
 
     // Modal States
     const [deleteConfirm, setDeleteConfirm] = useState({ isOpen: false, trainingId: null });
@@ -90,6 +95,8 @@ function Training() {
         setCurrentLevelIndex(0);
         setAnswers({});
         setVmStatus(null);
+        setCompletedTasks(new Set());
+        setPendingNextLevel(null);
         (async () => {
             try {
                 const res = await axios.post(`${API_URL}/training-runs`, null, { params: { definition_id: training.id } });
@@ -103,22 +110,38 @@ function Training() {
     // Subscribe to run events via WebSocket
     useEffect(() => {
         if (!runId) return;
-        const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-        const wsUrl = `${protocol}://${window.location.hostname}:8001/api/ws/training-runs/${runId}`;
-        const ws = new WebSocket(wsUrl);
-        wsRef.current = ws;
-        ws.onopen = () => console.log('WS open for run', runId);
-        ws.onmessage = (e) => {
-            try {
-                const data = JSON.parse(e.data);
-                setRunEvents(prev => [data, ...prev]);
-            } catch (err) {
-                console.error('Invalid WS message', err);
-            }
+        let cancelled = false;
+
+        const connectWs = () => {
+            if (cancelled) return;
+            // Derive WS URL from API_URL so it works with any host/port
+            const wsBase = API_URL.replace(/^http/, 'ws').replace(/\/api\/?$/, '');
+            const wsUrl = `${wsBase}/api/ws/training-runs/${runId}`;
+            const ws = new WebSocket(wsUrl);
+            wsRef.current = ws;
+            ws.onopen = () => console.log('WS open for run', runId);
+            ws.onmessage = (e) => {
+                try {
+                    const data = JSON.parse(e.data);
+                    setRunEvents(prev => [data, ...prev]);
+                } catch (err) {
+                    console.error('Invalid WS message', err);
+                }
+            };
+            ws.onclose = () => {
+                console.log('WS closed for run', runId);
+                if (!cancelled) {
+                    wsReconnectTimer.current = setTimeout(connectWs, 3000);
+                }
+            };
         };
-        ws.onclose = () => console.log('WS closed for run', runId);
+
+        connectWs();
+
         return () => {
-            try { ws.close(); } catch (e) {}
+            cancelled = true;
+            clearTimeout(wsReconnectTimer.current);
+            try { wsRef.current?.close(); } catch (e) {}
             wsRef.current = null;
         };
     }, [runId]);
@@ -127,13 +150,64 @@ function Training() {
     setAnswers({ ...answers, [taskId]: value });
   };
 
-  const checkAnswer = (task) => {
+  const handleCloseMessageModal = () => {
+    setMessageModal(prev => ({ ...prev, isOpen: false }));
+    if (pendingNextLevel !== null) {
+      const nextLevel = pendingNextLevel;
+      setPendingNextLevel(null);
+      // Keep VMs running — environment carries over to the next level
+      setCurrentLevelIndex(nextLevel);
+    }
+  };
+
+  const checkAnswer = async (task) => {
     const userAnswer = answers[task.id];
-    if (userAnswer && userAnswer.trim().toLowerCase() === task.answer.trim().toLowerCase()) {
-      setMessageModal({ isOpen: true, title: 'Success', message: 'Correct!', type: 'success' });
-      // Mark as completed (in local state for now)
+    if (!userAnswer || !userAnswer.trim()) {
+      setMessageModal({ isOpen: true, title: 'Incorrect', message: 'Please enter an answer.', type: 'error' });
+      return;
+    }
+
+    // If we have a run, submit to backend
+    if (runId) {
+      try {
+        const res = await axios.post(`${API_URL}/training-runs/${runId}/levels/${currentLevelIndex}/submit`, {
+          task_id: task.id,
+          answer: userAnswer
+        });
+        if (res.data.correct) {
+          setCompletedTasks(prev => new Set(prev).add(task.id));
+          // If there's a next level, prompt user instead of auto-advancing
+          if (res.data.next_level !== null && res.data.next_level !== undefined && res.data.next_level < activeTraining.levels.length) {
+            setPendingNextLevel(res.data.next_level);
+            setMessageModal({ isOpen: true, title: 'Correct!', message: `Score: ${res.data.score}. Click Close to proceed to the next level.`, type: 'success' });
+          } else {
+            setMessageModal({ isOpen: true, title: 'Correct!', message: `Score: ${res.data.score}`, type: 'success' });
+          }
+        } else {
+          setMessageModal({ isOpen: true, title: 'Incorrect', message: 'Try again.', type: 'error' });
+        }
+      } catch (e) {
+        setMessageModal({ isOpen: true, title: 'Error', message: 'Failed to submit answer: ' + (e.response?.data?.detail || e.message), type: 'error' });
+      }
     } else {
-      setMessageModal({ isOpen: true, title: 'Incorrect', message: 'Incorrect, try again.', type: 'error' });
+      // Fallback local check when no run is active
+      if (userAnswer.trim().toLowerCase() === (task.answer || '').trim().toLowerCase()) {
+        setCompletedTasks(prev => new Set(prev).add(task.id));
+        setMessageModal({ isOpen: true, title: 'Correct!', message: 'Well done!', type: 'success' });
+      } else {
+        setMessageModal({ isOpen: true, title: 'Incorrect', message: 'Try again.', type: 'error' });
+      }
+    }
+  };
+
+  const takeHint = async (task, hintIdx) => {
+    if (!runId) return;
+    try {
+      await axios.post(`${API_URL}/training-runs/${runId}/levels/${currentLevelIndex}/hint`, null, {
+        params: { hint_idx: hintIdx }
+      });
+    } catch (e) {
+      console.error('Failed to record hint usage', e);
     }
   };
 
@@ -241,7 +315,9 @@ function Training() {
             {level ? (
                 <>
                     <h2 className="text-2xl font-bold mb-2">{level.title}</h2>
-                    <p className="text-secondary mb-6">{level.description}</p>
+                    <div className="prose prose-invert prose-sm max-w-none mb-6 text-secondary [&_h1]:text-primary [&_h2]:text-primary [&_h3]:text-primary [&_h4]:text-primary [&_strong]:text-primary [&_code]:bg-background [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded [&_code]:text-accent [&_pre]:bg-background [&_pre]:border [&_pre]:border-border [&_pre]:rounded-lg [&_a]:text-accent [&_li]:text-secondary [&_ul]:list-disc [&_ol]:list-decimal">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{level.description}</ReactMarkdown>
+                    </div>
 
                     {level.topology && (
                     <div className="bg-surface p-4 rounded-lg mb-6 border border-border">
@@ -288,6 +364,12 @@ function Training() {
                                                 {vm.state === 1 ? 'Running' : vm.status === 'error' ? 'Error' : 'Stopped'}
                                             </span>
                                         </div>
+                                        {vm.credentials && (
+                                            <div className="text-xs bg-blue-900/40 text-blue-300 px-3 py-2 rounded mb-2 flex items-center gap-4">
+                                                <span>Login: <code className="bg-background px-1.5 py-0.5 rounded text-primary font-mono">{vm.credentials.username}</code></span>
+                                                <span>Password: <code className="bg-background px-1.5 py-0.5 rounded text-primary font-mono">{vm.credentials.password}</code></span>
+                                            </div>
+                                        )}
                                         {vm.status === 'error' && (
                                             <div className="text-xs text-red-400 mb-2">
                                                 {vm.error || "Unknown error"}
@@ -323,7 +405,7 @@ function Training() {
                     {level.tasks.map(task => (
                         <div key={task.id} className="bg-surface p-6 rounded-xl border border-border">
                         <h4 className="font-bold mb-2 flex items-center text-primary">
-                            <CheckCircle className="mr-2 text-accent" size={20} />
+                            <CheckCircle className={`mr-2 ${completedTasks.has(task.id) ? 'text-green-400' : 'text-accent'}`} size={20} />
                             Task: {task.question}
                         </h4>
                         
@@ -348,7 +430,9 @@ function Training() {
                         {task.hints && task.hints.length > 0 && (
                             <div className="mt-4 text-sm text-secondary">
                             <details>
-                                <summary className="cursor-pointer hover:text-primary">Need a hint?</summary>
+                                <summary className="cursor-pointer hover:text-primary flex items-center gap-1" onClick={() => takeHint(task, 0)}>
+                                  <Lightbulb size={14} /> Need a hint? {runId && <span className="text-xs text-yellow-500">(costs 10 points)</span>}
+                                </summary>
                                 <ul className="list-disc list-inside mt-2 pl-2">
                                 {task.hints.map((hint, i) => <li key={i}>{hint}</li>)}
                                 </ul>
@@ -484,10 +568,12 @@ function Training() {
 
         <Modal
             isOpen={messageModal.isOpen}
-            onClose={() => setMessageModal({ ...messageModal, isOpen: false })}
+            onClose={handleCloseMessageModal}
             title={messageModal.title}
             footer={
-                <button onClick={() => setMessageModal({ ...messageModal, isOpen: false })} className="px-4 py-2 bg-surface hover:bg-surfaceHover text-primary rounded">Close</button>
+                <button onClick={handleCloseMessageModal} className="px-4 py-2 bg-surface hover:bg-surfaceHover text-primary rounded">
+                    {pendingNextLevel !== null ? 'Continue to Next Level' : 'Close'}
+                </button>
             }
         >
             <div className={`text-sm ${messageModal.type === 'error' ? 'text-red-400' : messageModal.type === 'success' ? 'text-green-400' : 'text-secondary'}`}>

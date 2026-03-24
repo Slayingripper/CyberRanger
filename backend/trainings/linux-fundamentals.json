@@ -1,0 +1,403 @@
+{
+  "id": "linux-fundamentals",
+  "title": "Linux Fundamentals: From Zero to Hero",
+  "description": "A comprehensive hands-on training that teaches you how to install, navigate, and use Linux from scratch. You will learn the command line, file system, user management, package management, networking basics, and essential system administration tasks. Perfect for beginners who want to build a solid foundation in Linux.",
+  "difficulty": "easy",
+  "levels": [
+    {
+      "id": "lvl-intro-shell",
+      "title": "Getting Started with the Linux Shell",
+      "description": "Welcome to Linux! In this level you will learn the basics of the Linux command line. After deploying the environment, connect to the VM via the VNC console below.\n\nThe Linux shell (also called terminal or command line) is a text-based interface where you type commands. It may look intimidating at first, but it's the most powerful way to interact with a Linux system.\n\n**Key concepts:**\n- The **prompt** shows your username, hostname, and current directory\n- Commands follow the pattern: `command [options] [arguments]`\n- Use `Tab` for auto-completion and the up/down arrows to recall previous commands\n\n**Try these commands:**\n1. `whoami` \u2014 shows your current username\n2. `hostname` \u2014 shows the machine's name\n3. `date` \u2014 shows the current date and time\n4. `echo \"Hello Linux!\"` \u2014 prints text to the screen\n5. `clear` \u2014 clears the terminal screen\n\nAnswer the tasks below to proceed to the next level.",
+      "topology": {
+        "vms": [
+          {
+            "name": "linux-workstation",
+            "image": "ubuntu-20.04",
+            "memory": 2048,
+            "vcpus": 2,
+            "cloud_init": {
+              "username": "trainee",
+              "packages": "htop\nnano\ntree\ncurl\nwget\nnet-tools",
+              "runcmd": [
+                "echo 'Welcome to Linux Fundamentals Training!' > /etc/motd",
+                "mkdir -p /home/trainee/exercises",
+                "echo 'Hello from the exercises directory!' > /home/trainee/exercises/welcome.txt",
+                "echo 'This is a secret file.' > /home/trainee/exercises/.hidden_file",
+                "mkdir -p /home/trainee/exercises/documents /home/trainee/exercises/scripts /home/trainee/exercises/logs",
+                "echo '#!/bin/bash\necho \"Script executed successfully!\"' > /home/trainee/exercises/scripts/hello.sh",
+                "chmod +x /home/trainee/exercises/scripts/hello.sh",
+                "echo 'Jan 1 System started' > /home/trainee/exercises/logs/system.log",
+                "echo 'Jan 2 User logged in' >> /home/trainee/exercises/logs/system.log",
+                "echo 'Jan 3 Error: disk full' >> /home/trainee/exercises/logs/system.log",
+                "echo 'Jan 4 System rebooted' >> /home/trainee/exercises/logs/system.log",
+                "chown -R trainee:trainee /home/trainee/exercises"
+              ]
+            }
+          }
+        ]
+      },
+      "tasks": [
+        {
+          "id": "t-whoami",
+          "question": "Run the 'whoami' command. What username are you logged in as?",
+          "type": "quiz",
+          "answer": "trainee",
+          "hints": [
+            "Type 'whoami' in the terminal and press Enter",
+            "The output is the username you are logged in as"
+          ]
+        },
+        {
+          "id": "t-echo",
+          "question": "What command prints text to the screen? (just the command name, not arguments)",
+          "type": "quiz",
+          "answer": "echo",
+          "hints": [
+            "Try typing: echo \"Hello World!\"",
+            "The command name is 4 letters long"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "lvl-filesystem",
+      "title": "Navigating the File System",
+      "description": "Linux organizes everything in a tree-like directory structure starting from the root `/`. In this level you will master navigating and exploring the file system.\n\n**Essential navigation commands:**\n- `pwd` \u2014 Print Working Directory (shows where you are)\n- `ls` \u2014 List files in current directory\n- `ls -la` \u2014 List ALL files (including hidden) with details\n- `cd <directory>` \u2014 Change into a directory\n- `cd ..` \u2014 Go up one level\n- `cd ~` \u2014 Go to your home directory\n- `cd /` \u2014 Go to root directory\n- `tree` \u2014 Show directory structure as a tree\n\n**Understanding the path:**\n- **Absolute path**: starts with `/` (e.g., `/home/trainee/exercises`)\n- **Relative path**: starts from current location (e.g., `exercises/documents`)\n- `.` means current directory, `..` means parent directory\n- Hidden files start with a dot (e.g., `.hidden_file`)\n\n**Try these exercises:**\n1. Navigate to `/home/trainee/exercises` and list all files (including hidden)\n2. Use `tree` to visualize the directory structure\n3. Navigate to different directories using both absolute and relative paths",
+      "topology": {
+        "vms": [
+          {
+            "name": "linux-workstation",
+            "image": "ubuntu-20.04",
+            "memory": 2048,
+            "vcpus": 2,
+            "cloud_init": {
+              "username": "trainee",
+              "packages": "htop\nnano\ntree\ncurl\nwget\nnet-tools",
+              "runcmd": [
+                "mkdir -p /home/trainee/exercises",
+                "echo 'Hello from the exercises directory!' > /home/trainee/exercises/welcome.txt",
+                "echo 'This is a secret file.' > /home/trainee/exercises/.hidden_file",
+                "mkdir -p /home/trainee/exercises/documents /home/trainee/exercises/scripts /home/trainee/exercises/logs",
+                "echo '#!/bin/bash\necho \"Script executed successfully!\"' > /home/trainee/exercises/scripts/hello.sh",
+                "chmod +x /home/trainee/exercises/scripts/hello.sh",
+                "echo 'Jan 1 System started' > /home/trainee/exercises/logs/system.log",
+                "echo 'Jan 2 User logged in' >> /home/trainee/exercises/logs/system.log",
+                "echo 'Jan 3 Error: disk full' >> /home/trainee/exercises/logs/system.log",
+                "echo 'Jan 4 System rebooted' >> /home/trainee/exercises/logs/system.log",
+                "chown -R trainee:trainee /home/trainee/exercises"
+              ]
+            }
+          }
+        ]
+      },
+      "tasks": [
+        {
+          "id": "t-pwd",
+          "question": "What command shows your current directory? (just the command name)",
+          "type": "quiz",
+          "answer": "pwd",
+          "hints": [
+            "It stands for 'Print Working Directory'",
+            "It's a 3-letter command"
+          ]
+        },
+        {
+          "id": "t-hidden",
+          "question": "Navigate to ~/exercises and list hidden files. What is the name of the hidden file? (include the dot)",
+          "type": "quiz",
+          "answer": ".hidden_file",
+          "hints": [
+            "Use 'ls -la' to show hidden files (files starting with a dot)",
+            "Look for a file starting with '.' that isn't '.' or '..'"
+          ]
+        },
+        {
+          "id": "t-subdir-count",
+          "question": "How many subdirectories are inside ~/exercises? (just the number)",
+          "type": "quiz",
+          "answer": "3",
+          "hints": [
+            "Use 'ls ~/exercises' or 'tree ~/exercises' to see the structure",
+            "The directories are: documents, scripts, and logs"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "lvl-files",
+      "title": "Working with Files and Directories",
+      "description": "Now that you can navigate, let's learn to create, copy, move, and delete files and directories.\n\n**File operations:**\n- `cat <file>` \u2014 Display file contents\n- `less <file>` \u2014 View file contents page by page (press `q` to quit)\n- `head -n 5 <file>` \u2014 Show first 5 lines\n- `tail -n 5 <file>` \u2014 Show last 5 lines\n- `touch <file>` \u2014 Create an empty file\n- `cp <source> <dest>` \u2014 Copy a file\n- `mv <source> <dest>` \u2014 Move or rename a file\n- `rm <file>` \u2014 Delete a file (careful, no recycle bin!)\n\n**Directory operations:**\n- `mkdir <name>` \u2014 Create a directory\n- `mkdir -p path/to/nested` \u2014 Create nested directories\n- `rmdir <name>` \u2014 Remove an empty directory\n- `rm -r <name>` \u2014 Remove a directory and its contents\n- `cp -r <source> <dest>` \u2014 Copy a directory recursively\n\n**Finding things:**\n- `find /path -name \"*.txt\"` \u2014 Find files by name\n- `grep \"pattern\" file` \u2014 Search for text inside files\n- `grep -r \"pattern\" dir/` \u2014 Search recursively in a directory\n\n**Exercises:**\n1. Read the content of `~/exercises/welcome.txt`\n2. Create a new file called `myfile.txt` in exercises\n3. Search the log file for the word \"Error\"",
+      "topology": {
+        "vms": [
+          {
+            "name": "linux-workstation",
+            "image": "ubuntu-20.04",
+            "memory": 2048,
+            "vcpus": 2,
+            "cloud_init": {
+              "username": "trainee",
+              "packages": "htop\nnano\ntree\ncurl\nwget\nnet-tools",
+              "runcmd": [
+                "mkdir -p /home/trainee/exercises",
+                "echo 'Hello from the exercises directory!' > /home/trainee/exercises/welcome.txt",
+                "echo 'This is a secret file.' > /home/trainee/exercises/.hidden_file",
+                "mkdir -p /home/trainee/exercises/documents /home/trainee/exercises/scripts /home/trainee/exercises/logs",
+                "echo '#!/bin/bash\necho \"Script executed successfully!\"' > /home/trainee/exercises/scripts/hello.sh",
+                "chmod +x /home/trainee/exercises/scripts/hello.sh",
+                "echo 'Jan 1 System started' > /home/trainee/exercises/logs/system.log",
+                "echo 'Jan 2 User logged in' >> /home/trainee/exercises/logs/system.log",
+                "echo 'Jan 3 Error: disk full' >> /home/trainee/exercises/logs/system.log",
+                "echo 'Jan 4 System rebooted' >> /home/trainee/exercises/logs/system.log",
+                "chown -R trainee:trainee /home/trainee/exercises"
+              ]
+            }
+          }
+        ]
+      },
+      "tasks": [
+        {
+          "id": "t-cat-welcome",
+          "question": "Use 'cat' to read ~/exercises/welcome.txt. What does the file say? (exact text)",
+          "type": "quiz",
+          "answer": "Hello from the exercises directory!",
+          "hints": [
+            "Run: cat ~/exercises/welcome.txt",
+            "Type the output exactly as displayed"
+          ]
+        },
+        {
+          "id": "t-grep-error",
+          "question": "Use grep to search for 'Error' in ~/exercises/logs/system.log. On which day (Jan X) did the error occur? (e.g., Jan 1)",
+          "type": "quiz",
+          "answer": "Jan 3",
+          "hints": [
+            "Run: grep 'Error' ~/exercises/logs/system.log",
+            "Look at the date at the beginning of the matching line"
+          ]
+        },
+        {
+          "id": "t-find-cmd",
+          "question": "What command searches for text patterns inside files? (just the command name)",
+          "type": "quiz",
+          "answer": "grep",
+          "hints": [
+            "It stands for 'Global Regular Expression Print'",
+            "Usage: <command> 'pattern' filename"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "lvl-permissions",
+      "title": "Users, Groups, and Permissions",
+      "description": "Linux is a multi-user system. Understanding permissions is critical for security and administration.\n\n**User commands:**\n- `whoami` \u2014 Current user\n- `id` \u2014 Show user ID, group ID, and groups\n- `sudo <command>` \u2014 Run a command as root (superuser)\n- `su - <user>` \u2014 Switch to another user\n- `passwd` \u2014 Change your password\n\n**Permission model:**\nEvery file has three permission sets: **Owner**, **Group**, **Others**\nEach set has three permissions: **r**ead (4), **w**rite (2), e**x**ecute (1)\n\nExample: `-rwxr-xr--` means:\n- Owner: rwx (read+write+execute = 7)\n- Group: r-x (read+execute = 5)\n- Others: r-- (read only = 4)\n- Numeric: 754\n\n**Permission commands:**\n- `ls -la` \u2014 View permissions\n- `chmod 755 file` \u2014 Set permissions numerically\n- `chmod u+x file` \u2014 Add execute for owner\n- `chown user:group file` \u2014 Change file ownership\n\n**Exercises:**\n1. Check the permissions on ~/exercises/scripts/hello.sh\n2. Try running the script: `./exercises/scripts/hello.sh`\n3. Explore `id` to see your user info",
+      "topology": {
+        "vms": [
+          {
+            "name": "linux-workstation",
+            "image": "ubuntu-20.04",
+            "memory": 2048,
+            "vcpus": 2,
+            "cloud_init": {
+              "username": "trainee",
+              "packages": "htop\nnano\ntree\ncurl\nwget\nnet-tools",
+              "runcmd": [
+                "mkdir -p /home/trainee/exercises/scripts",
+                "echo '#!/bin/bash\necho \"Script executed successfully!\"' > /home/trainee/exercises/scripts/hello.sh",
+                "chmod 755 /home/trainee/exercises/scripts/hello.sh",
+                "echo 'secret data' > /home/trainee/exercises/restricted.txt",
+                "chmod 600 /home/trainee/exercises/restricted.txt",
+                "chown -R trainee:trainee /home/trainee/exercises"
+              ]
+            }
+          }
+        ]
+      },
+      "tasks": [
+        {
+          "id": "t-script-output",
+          "question": "Run ~/exercises/scripts/hello.sh \u2014 what is the output?",
+          "type": "quiz",
+          "answer": "Script executed successfully!",
+          "hints": [
+            "Run: ~/exercises/scripts/hello.sh or bash ~/exercises/scripts/hello.sh",
+            "If permission denied, check if the execute bit is set with ls -la"
+          ]
+        },
+        {
+          "id": "t-chmod-numeric",
+          "question": "What is the numeric chmod value for: owner=read+write+execute, group=read+execute, others=no permissions?",
+          "type": "quiz",
+          "answer": "750",
+          "hints": [
+            "Owner: r(4)+w(2)+x(1) = 7, Group: r(4)+x(1) = 5, Others: 0",
+            "Combine all three digits: 7, 5, 0"
+          ]
+        },
+        {
+          "id": "t-sudo",
+          "question": "What command lets you run a command with superuser (root) privileges?",
+          "type": "quiz",
+          "answer": "sudo",
+          "hints": [
+            "It stands for 'SuperUser DO'",
+            "Usage: <command> apt update"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "lvl-packages",
+      "title": "Package Management and Software Installation",
+      "description": "One of the most important skills in Linux is installing and managing software. Ubuntu/Debian use the `apt` package manager.\n\n**Package management commands:**\n- `sudo apt update` \u2014 Refresh the package index (always do this first!)\n- `sudo apt install <package>` \u2014 Install a package\n- `sudo apt remove <package>` \u2014 Remove a package\n- `sudo apt upgrade` \u2014 Upgrade all installed packages\n- `apt search <keyword>` \u2014 Search for packages\n- `apt list --installed` \u2014 List installed packages\n- `dpkg -l` \u2014 List all packages (low-level)\n\n**Common useful packages:**\n- `vim` or `nano` \u2014 Text editors\n- `htop` \u2014 Interactive process viewer\n- `curl` / `wget` \u2014 Download files from the web\n- `git` \u2014 Version control system\n- `ufw` \u2014 Uncomplicated Firewall\n- `nginx` or `apache2` \u2014 Web servers\n\n**Exercises:**\n1. Update the package list\n2. Check if `htop` is installed and try running it (press `q` to quit)\n3. Search for a package related to 'network scanning'",
+      "topology": {
+        "vms": [
+          {
+            "name": "linux-workstation",
+            "image": "ubuntu-20.04",
+            "memory": 2048,
+            "vcpus": 2,
+            "cloud_init": {
+              "username": "trainee",
+              "packages": "htop\nnano\ntree\ncurl\nwget\nnet-tools"
+            }
+          }
+        ]
+      },
+      "tasks": [
+        {
+          "id": "t-apt-update",
+          "question": "What is the full command to refresh the package database on Ubuntu? (include sudo)",
+          "type": "quiz",
+          "answer": "sudo apt update",
+          "hints": [
+            "You need superuser privileges and the apt package manager",
+            "Format: sudo apt <action>"
+          ]
+        },
+        {
+          "id": "t-apt-install",
+          "question": "What is the full command to install the 'nmap' network scanner? (include sudo)",
+          "type": "quiz",
+          "answer": "sudo apt install nmap",
+          "hints": [
+            "Use the same pattern: sudo apt <action> <package-name>",
+            "The action to add new software is 'install'"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "lvl-networking",
+      "title": "Networking Basics",
+      "description": "Understanding networking is essential for any Linux user or administrator.\n\n**Network information commands:**\n- `ip addr` or `ip a` \u2014 Show IP addresses and interfaces\n- `ip route` \u2014 Show routing table\n- `hostname -I` \u2014 Show IP addresses quickly\n- `ifconfig` \u2014 Classic network info (from net-tools package)\n\n**Connectivity testing:**\n- `ping <host>` \u2014 Test connectivity (Ctrl+C to stop)\n- `ping -c 4 <host>` \u2014 Send exactly 4 pings\n- `traceroute <host>` \u2014 Trace the network path\n- `dig <domain>` \u2014 DNS lookup\n- `curl <url>` \u2014 Fetch a web page from command line\n- `wget <url>` \u2014 Download a file from the web\n\n**Network monitoring:**\n- `ss -tuln` \u2014 Show listening ports\n- `netstat -tuln` \u2014 Show listening ports (classic)\n\n**Exercises:**\n1. Find your VM's IP address\n2. Check which ports are listening on this machine\n3. Fetch the locally running web server with curl",
+      "topology": {
+        "vms": [
+          {
+            "name": "linux-workstation",
+            "image": "ubuntu-20.04",
+            "memory": 2048,
+            "vcpus": 2,
+            "cloud_init": {
+              "username": "trainee",
+              "packages": "htop\nnano\ntree\ncurl\nwget\nnet-tools\ntraceroute",
+              "runcmd": [
+                "apt-get install -y nginx",
+                "systemctl enable nginx",
+                "systemctl start nginx",
+                "echo '<h1>Welcome to your Linux Training Server!</h1>' > /var/www/html/index.html"
+              ]
+            }
+          }
+        ]
+      },
+      "tasks": [
+        {
+          "id": "t-ip-cmd",
+          "question": "What command shows your network interfaces and IP addresses? (the short modern form, two words)",
+          "type": "quiz",
+          "answer": "ip a",
+          "hints": [
+            "It's the modern replacement for 'ifconfig'",
+            "Full form is 'ip addr', but there is a shorter alias"
+          ]
+        },
+        {
+          "id": "t-listening-ports",
+          "question": "Use 'ss -tuln' to list listening ports. Is port 80 open? (yes/no)",
+          "type": "quiz",
+          "answer": "yes",
+          "hints": [
+            "A web server (nginx) was installed and started on this VM",
+            "Look for ':80' in the output of 'ss -tuln'"
+          ]
+        },
+        {
+          "id": "t-curl-local",
+          "question": "Use 'curl localhost' to fetch the web page running on this machine. What HTML tag wraps the welcome message? (e.g., <p> or <h2>)",
+          "type": "quiz",
+          "answer": "<h1>",
+          "hints": [
+            "Run: curl localhost",
+            "Look at the HTML tag surrounding 'Welcome to your Linux Training Server!'"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "lvl-processes",
+      "title": "Processes and System Monitoring",
+      "description": "Everything running on Linux is a process. Learning to monitor and manage processes is a key sysadmin skill.\n\n**Process viewing:**\n- `ps` \u2014 Show your processes\n- `ps aux` \u2014 Show ALL processes with details\n- `top` \u2014 Real-time process monitor (press `q` to quit)\n- `htop` \u2014 Enhanced process monitor (press `q` to quit)\n- `pgrep <name>` \u2014 Find process ID by name\n\n**Process management:**\n- `kill <PID>` \u2014 Send termination signal to a process\n- `kill -9 <PID>` \u2014 Force kill a process\n- `killall <name>` \u2014 Kill all processes by name\n- `<command> &` \u2014 Run command in background\n- `jobs` \u2014 List background jobs\n- `Ctrl+C` \u2014 Interrupt/stop current process\n- `Ctrl+Z` \u2014 Suspend current process\n\n**System information:**\n- `uptime` \u2014 System uptime and load average\n- `free -h` \u2014 Memory usage (human-readable)\n- `df -h` \u2014 Disk space usage\n- `du -sh <dir>` \u2014 Directory size\n- `uname -a` \u2014 System information\n\n**Exercises:**\n1. Use `htop` to explore running processes\n2. Check disk and memory usage\n3. Find the nginx process",
+      "topology": {
+        "vms": [
+          {
+            "name": "linux-workstation",
+            "image": "ubuntu-20.04",
+            "memory": 2048,
+            "vcpus": 2,
+            "cloud_init": {
+              "username": "trainee",
+              "packages": "htop\nnano\ntree\ncurl\nwget\nnet-tools",
+              "runcmd": [
+                "apt-get install -y nginx",
+                "systemctl start nginx"
+              ]
+            }
+          }
+        ]
+      },
+      "tasks": [
+        {
+          "id": "t-free-cmd",
+          "question": "What command shows memory usage in human-readable format? (full command with flag)",
+          "type": "quiz",
+          "answer": "free -h",
+          "hints": [
+            "The command is 'free' and the flag for human-readable is -h",
+            "Human-readable means sizes in MB/GB instead of bytes"
+          ]
+        },
+        {
+          "id": "t-pgrep-nginx",
+          "question": "Use 'pgrep nginx' \u2014 does it return any process IDs? (yes/no)",
+          "type": "quiz",
+          "answer": "yes",
+          "hints": [
+            "nginx was installed and started on this VM",
+            "pgrep returns PIDs of matching processes; if you see numbers, the answer is yes"
+          ]
+        },
+        {
+          "id": "t-df",
+          "question": "What command shows disk space usage? (just the command name, no flags)",
+          "type": "quiz",
+          "answer": "df",
+          "hints": [
+            "It stands for 'Disk Free'",
+            "Use it with -h flag for human-readable output"
+          ]
+        }
+      ]
+    }
+  ]
+}

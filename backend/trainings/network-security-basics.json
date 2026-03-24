@@ -1,0 +1,176 @@
+{
+  "id": "network-security-basics",
+  "title": "Network Security Fundamentals",
+  "description": "Learn the basics of network security by setting up a small network, scanning for vulnerabilities, analyzing traffic, and hardening a Linux server. This training covers reconnaissance, port scanning, firewall configuration, and basic intrusion detection.",
+  "difficulty": "medium",
+  "levels": [
+    {
+      "id": "lvl-recon",
+      "title": "Network Reconnaissance",
+      "description": "Reconnaissance is the first phase of any security assessment. In this level you will learn to discover hosts and services on a network.\n\nYou have two machines:\n- **scanner** \u2014 Your Kali Linux attacker/auditor workstation\n- **target** \u2014 An Ubuntu server running various services\n\nBoth are on the same virtual network. Deploy the environment, then use the VNC console on the scanner machine.\n\n**Reconnaissance tools:**\n- `ip a` \u2014 Check your own IP address\n- `ping <target>` \u2014 Check if a host is alive\n- `nmap <target>` \u2014 Port scan a target\n- `nmap -sV <target>` \u2014 Detect service versions\n- `nmap -O <target>` \u2014 Detect operating system\n- `nmap -A <target>` \u2014 Aggressive scan (OS + version + scripts)\n\n**Steps:**\n1. Find your scanner's IP with `ip a`\n2. Scan the target with `nmap 10.0.0.10`\n3. Identify open ports and running services",
+      "topology": {
+        "vms": [
+          {
+            "name": "scanner",
+            "image": "kali-linux",
+            "memory": 2048,
+            "vcpus": 2,
+            "cloud_init": {
+              "username": "kali"
+            }
+          },
+          {
+            "name": "target",
+            "image": "ubuntu-20.04",
+            "memory": 1024,
+            "vcpus": 1,
+            "cloud_init": {
+              "username": "admin",
+              "packages": "nginx\nopenssh-server\nvsftpd\nnet-tools",
+              "runcmd": [
+                "systemctl enable nginx && systemctl start nginx",
+                "systemctl enable ssh && systemctl start ssh",
+                "systemctl enable vsftpd && systemctl start vsftpd",
+                "echo '<h1>Target Web Server</h1><p>Flag: flag{web_discovered}</p>' > /var/www/html/index.html",
+                "ip addr add 10.0.0.10/24 dev eth0 2>/dev/null || true"
+              ]
+            }
+          }
+        ]
+      },
+      "tasks": [
+        {
+          "id": "t-open-ports",
+          "question": "How many standard service ports are open on the target? (SSH=22, HTTP=80, FTP=21) \u2014 just the number",
+          "type": "quiz",
+          "answer": "3",
+          "hints": [
+            "Run: nmap 10.0.0.10 (or the target's IP)",
+            "Look for ports 21, 22, and 80 in the scan results"
+          ]
+        },
+        {
+          "id": "t-web-flag",
+          "question": "Use curl to fetch the target's web page. What is the flag? (format: flag{...})",
+          "type": "flag",
+          "answer": "flag{web_discovered}",
+          "hints": [
+            "Run: curl http://10.0.0.10",
+            "The flag is embedded in the HTML page"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "lvl-firewall",
+      "title": "Firewall Configuration with UFW",
+      "description": "Firewalls are the first line of defense. In this level you will learn to configure Ubuntu's Uncomplicated Firewall (UFW) to control network access.\n\n**UFW basics:**\n- `sudo ufw status` \u2014 Check firewall status\n- `sudo ufw enable` \u2014 Enable the firewall\n- `sudo ufw disable` \u2014 Disable the firewall\n- `sudo ufw default deny incoming` \u2014 Deny all incoming by default\n- `sudo ufw default allow outgoing` \u2014 Allow all outgoing\n- `sudo ufw allow 22/tcp` \u2014 Allow SSH\n- `sudo ufw allow 80/tcp` \u2014 Allow HTTP\n- `sudo ufw deny 21/tcp` \u2014 Deny FTP\n- `sudo ufw status numbered` \u2014 Show rules with numbers\n- `sudo ufw delete <rule_number>` \u2014 Delete a rule\n\n**Best practices:**\n1. Always allow SSH first (so you don't lock yourself out!)\n2. Use 'default deny incoming' policy\n3. Only open ports for services you actually need\n4. Use `sudo ufw status verbose` to review your full config\n\nConnect to the **target** VM and configure the firewall as instructed.",
+      "topology": {
+        "vms": [
+          {
+            "name": "target",
+            "image": "ubuntu-20.04",
+            "memory": 1024,
+            "vcpus": 1,
+            "cloud_init": {
+              "username": "admin",
+              "packages": "ufw\nnginx\nopenssh-server\nvsftpd\nnet-tools",
+              "runcmd": [
+                "systemctl start nginx",
+                "systemctl start ssh",
+                "systemctl start vsftpd"
+              ]
+            }
+          }
+        ]
+      },
+      "tasks": [
+        {
+          "id": "t-ufw-status",
+          "question": "What is the default status of UFW on a fresh Ubuntu install? (active/inactive)",
+          "type": "quiz",
+          "answer": "inactive",
+          "hints": [
+            "Run: sudo ufw status",
+            "By default, UFW is not enabled on Ubuntu"
+          ]
+        },
+        {
+          "id": "t-ufw-allow",
+          "question": "What is the UFW command to allow SSH access? (full command with sudo, use the port number)",
+          "type": "quiz",
+          "answer": "sudo ufw allow 22/tcp",
+          "hints": [
+            "SSH runs on port 22 and uses TCP",
+            "Format: sudo ufw allow <port>/<protocol>"
+          ]
+        },
+        {
+          "id": "t-ufw-deny-ftp",
+          "question": "What UFW command would deny FTP access? (full command with sudo, use port number)",
+          "type": "quiz",
+          "answer": "sudo ufw deny 21/tcp",
+          "hints": [
+            "FTP runs on port 21 and uses TCP",
+            "Replace 'allow' with 'deny' in the command pattern"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "lvl-ssh-hardening",
+      "title": "SSH Hardening and Key-Based Authentication",
+      "description": "SSH is the primary way to remotely manage Linux servers. Securing SSH is critical.\n\n**SSH basics:**\n- `ssh user@host` \u2014 Connect to a remote host\n- `ssh -p 2222 user@host` \u2014 Connect on a non-standard port\n- `ssh-keygen` \u2014 Generate an SSH key pair\n- `ssh-copy-id user@host` \u2014 Copy your public key to the server\n\n**SSH hardening steps:**\n1. Edit `/etc/ssh/sshd_config` with a text editor (nano or vim)\n2. Key changes to make:\n   - `PermitRootLogin no` \u2014 Disable root login\n   - `PasswordAuthentication no` \u2014 Require key-based auth (after setting up keys!)\n   - `Port 2222` \u2014 Change from default port 22\n   - `MaxAuthTries 3` \u2014 Limit authentication attempts\n   - `AllowUsers admin` \u2014 Restrict which users can SSH\n3. Restart SSH: `sudo systemctl restart sshd`\n\n**SSH key authentication flow:**\n1. Generate keypair: `ssh-keygen -t ed25519`\n2. Copy public key to server: `ssh-copy-id user@server`\n3. Test login: `ssh user@server` (should not ask for password)\n4. Disable password auth in sshd_config\n\nConnect to the target VM and answer the security questions.",
+      "topology": {
+        "vms": [
+          {
+            "name": "target",
+            "image": "ubuntu-20.04",
+            "memory": 1024,
+            "vcpus": 1,
+            "cloud_init": {
+              "username": "admin",
+              "packages": "openssh-server\nnano",
+              "runcmd": [
+                "systemctl enable ssh",
+                "systemctl start ssh"
+              ]
+            }
+          }
+        ]
+      },
+      "tasks": [
+        {
+          "id": "t-sshd-config",
+          "question": "What is the path to the main SSH server configuration file?",
+          "type": "quiz",
+          "answer": "/etc/ssh/sshd_config",
+          "hints": [
+            "It's in the /etc/ssh/ directory",
+            "The daemon config has a 'd' in the name (sshd = SSH daemon)"
+          ]
+        },
+        {
+          "id": "t-root-login",
+          "question": "What SSH config directive should be set to 'no' to prevent root from logging in via SSH?",
+          "type": "quiz",
+          "answer": "PermitRootLogin",
+          "hints": [
+            "Look in /etc/ssh/sshd_config for a line about root login",
+            "The directive name contains 'Root' and 'Login'"
+          ]
+        },
+        {
+          "id": "t-keygen-algo",
+          "question": "What is the recommended modern algorithm for SSH key generation? (the algorithm name after -t flag)",
+          "type": "quiz",
+          "answer": "ed25519",
+          "hints": [
+            "It's a modern elliptic curve algorithm",
+            "The command is: ssh-keygen -t <algorithm>"
+          ]
+        }
+      ]
+    }
+  ]
+}

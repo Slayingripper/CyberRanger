@@ -3,6 +3,13 @@
   "title": "Example: Echo VM Scenario",
   "description": "A simple example training with one VM and one quiz task to test deploys and console streaming.",
   "difficulty": "easy",
+  "sources": {
+    "cirros.img": {
+      "url": "https://download.cirros-cloud.net/0.6.2/cirros-0.6.2-x86_64-disk.img",
+      "filename": "cirros.img",
+      "min_bytes": 10000000
+    }
+  },
   "levels": [
     {
       "id": "lvl-echo",

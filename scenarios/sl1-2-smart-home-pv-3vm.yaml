@@ -8,15 +8,19 @@ scenario:
   difficulty: "hard"
   sources:
     # Auto-download Ubuntu base image if missing
-    ubuntu-20.04: "https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-amd64.img"
+    ubuntu-20.04:
+      url: "https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-amd64.img"
+      filename: "focal-server-cloudimg-amd64.img"
+      sha256: "18f2977d77dfea1b74aee14533bd21c34f789139e949c57023b7364894b7e5e9"
 
     # Kali QEMU image is distributed as a .7z; backend will download + extract to qcow2.
     kali-linux:
-      url: "https://cdimage.kali.org/current/kali-linux-2025.4-qemu-amd64.7z"
-      filename: "kali-linux-2025.4-qemu-amd64.7z"
+      url: "https://cdimage.kali.org/current/kali-linux-2026.1-qemu-amd64.7z"
+      filename: "kali-linux-2026.1-qemu-amd64.7z"
+      archive_sha256: "efce2da10c775da5f58954166f633d5da9115e29663731dcb65d616f19d966f4"
       extract:
         type: "7z"
-        output_filename: "kali-linux-2025.4-qemu-amd64.qcow2"
+        output_filename: "kali-linux-2026.1-qemu-amd64.qcow2"
         member_glob: "*.qcow2"
 
     # Security Onion ISO (downloaded once, cached)
@@ -71,11 +75,15 @@ nodes:
       ram: 16384
       assets: []
       automation:
-        type: "send_text"
-        text: "yes\n"
-        delay_seconds: 45
-        retries: 3
-        retry_delay_seconds: 15
+        steps:
+          - type: wait
+            delay_seconds: 60
+          - type: send_text
+            text: "yes\n"
+            retries: 3
+            retry_delay_seconds: 15
+          - type: send_key
+            key: enter
 
 edges:
   - id: "e-attacker-game"

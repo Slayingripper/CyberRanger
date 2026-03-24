@@ -1,0 +1,181 @@
+{
+  "id": "ctf-introduction",
+  "title": "Capture The Flag: Getting Started",
+  "description": "Learn the art of Capture The Flag (CTF) competitions! This beginner-friendly training covers common CTF categories: web exploitation, cryptography, steganography, and basic forensics. Each level presents a realistic challenge with a flag to capture.",
+  "difficulty": "medium",
+  "levels": [
+    {
+      "id": "lvl-ctf-web",
+      "title": "Web Exploitation 101",
+      "description": "Web challenges are the most common category in CTFs. In this level you will learn to find hidden information in web applications.\n\n**Common web exploitation techniques:**\n- **View Source**: Right-click then View Page Source (flags hidden in HTML comments)\n- **Inspect Element**: Check hidden form fields, JavaScript variables\n- **Robots.txt**: Check `/robots.txt` for disallowed/hidden paths\n- **Directory Enumeration**: Discover hidden directories and files\n- **HTTP Headers**: Flags can be hidden in response headers\n- **Cookies**: Check cookies for encoded values\n\n**Useful tools:**\n- `curl -v <url>` \u2014 View full HTTP request/response with headers\n- `curl <url>/robots.txt` \u2014 Check robots.txt\n- `curl -I <url>` \u2014 Show only HTTP response headers\n\n**Your target** is a web server running on this VM. Explore it thoroughly!\n\n**Steps:**\n1. Deploy the environment\n2. Use curl to explore the web server\n3. Check common hidden locations (robots.txt, page source, headers)",
+      "topology": {
+        "vms": [
+          {
+            "name": "ctf-web",
+            "image": "ubuntu-20.04",
+            "memory": 1024,
+            "vcpus": 1,
+            "cloud_init": {
+              "username": "ctf",
+              "packages": "nginx\ncurl",
+              "runcmd": [
+                "mkdir -p /var/www/html/secret",
+                "echo '<!DOCTYPE html><html><head><title>CTF Challenge</title></head><body><h1>Welcome to the CTF Web Challenge</h1><p>Can you find the hidden flags?</p><!-- flag{source_code_matters} --></body></html>' > /var/www/html/index.html",
+                "echo 'User-agent: *\nDisallow: /secret/\nDisallow: /admin-panel/' > /var/www/html/robots.txt",
+                "echo '<h1>Secret Page</h1><p>flag{robots_txt_is_public}</p>' > /var/www/html/secret/index.html",
+                "mkdir -p /var/www/html/admin-panel",
+                "echo '<h1>Admin Panel</h1><p>flag{directory_listing_ftw}</p>' > /var/www/html/admin-panel/index.html",
+                "systemctl restart nginx"
+              ]
+            }
+          }
+        ]
+      },
+      "tasks": [
+        {
+          "id": "t-flag-source",
+          "question": "View the source of the main page (curl localhost). Find the flag hidden in an HTML comment. (format: flag{...})",
+          "type": "flag",
+          "answer": "flag{source_code_matters}",
+          "hints": [
+            "Run: curl localhost",
+            "Look for HTML comments (<!-- ... -->) in the output"
+          ]
+        },
+        {
+          "id": "t-flag-robots",
+          "question": "Check robots.txt, then visit the secret path it reveals. What flag do you find?",
+          "type": "flag",
+          "answer": "flag{robots_txt_is_public}",
+          "hints": [
+            "First run: curl localhost/robots.txt",
+            "Then visit the Disallowed path: curl localhost/secret/"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "lvl-ctf-crypto",
+      "title": "Basic Cryptography",
+      "description": "Cryptography challenges test your ability to decode and decrypt messages. Let's start with the basics.\n\n**Common encoding/encryption schemes in CTFs:**\n\n1. **Base64** \u2014 Binary-to-text encoding\n   - Encode: `echo -n 'text' | base64`\n   - Decode: `echo 'dGV4dA==' | base64 -d`\n   - Recognizable by: letters, numbers, +, /, = padding\n\n2. **ROT13** \u2014 Simple letter rotation cipher\n   - Encode/Decode: `echo 'text' | tr 'A-Za-z' 'N-ZA-Mn-za-m'`\n   - Each letter shifted by 13 positions\n\n3. **Hex encoding** \u2014 Convert to/from hexadecimal\n   - Encode: `echo -n 'text' | xxd -p`\n   - Decode: `echo '74657874' | xxd -r -p`\n\n4. **Caesar cipher** \u2014 Shift letters by a fixed number\n   - Try different shift values to break it\n\n**Exercises:**\nThe VM has several encoded messages for you to decode. Check the files in ~/challenges/",
+      "topology": {
+        "vms": [
+          {
+            "name": "crypto-lab",
+            "image": "ubuntu-20.04",
+            "memory": 1024,
+            "vcpus": 1,
+            "cloud_init": {
+              "username": "ctf",
+              "runcmd": [
+                "mkdir -p /home/ctf/challenges",
+                "echo -n 'flag{base64_decoded}' | base64 > /home/ctf/challenges/challenge1.txt",
+                "echo 'This message is Base64 encoded. Decode the contents of this file to find the flag.' > /home/ctf/challenges/challenge1_hint.txt",
+                "echo 'synt{ebg13_penpxrq}' > /home/ctf/challenges/challenge2.txt",
+                "echo 'This message uses ROT13 encoding. Each letter is shifted 13 places.' > /home/ctf/challenges/challenge2_hint.txt",
+                "echo -n 'flag{hex_master}' | xxd -p > /home/ctf/challenges/challenge3.txt",
+                "echo 'This message is hex-encoded. Use xxd to decode it.' > /home/ctf/challenges/challenge3_hint.txt",
+                "chown -R ctf:ctf /home/ctf/challenges"
+              ]
+            }
+          }
+        ]
+      },
+      "tasks": [
+        {
+          "id": "t-base64-flag",
+          "question": "Decode ~/challenges/challenge1.txt (Base64 encoded). What is the flag?",
+          "type": "flag",
+          "answer": "flag{base64_decoded}",
+          "hints": [
+            "Read the file: cat ~/challenges/challenge1.txt",
+            "Decode it: cat ~/challenges/challenge1.txt | base64 -d"
+          ]
+        },
+        {
+          "id": "t-rot13-flag",
+          "question": "Decode ~/challenges/challenge2.txt (ROT13 encoded). What is the flag?",
+          "type": "flag",
+          "answer": "flag{rot13_cracked}",
+          "hints": [
+            "Read the file: cat ~/challenges/challenge2.txt",
+            "Decode with: cat ~/challenges/challenge2.txt | tr 'A-Za-z' 'N-ZA-Mn-za-m'"
+          ]
+        },
+        {
+          "id": "t-hex-flag",
+          "question": "Decode ~/challenges/challenge3.txt (hex encoded). What is the flag?",
+          "type": "flag",
+          "answer": "flag{hex_master}",
+          "hints": [
+            "Read the file: cat ~/challenges/challenge3.txt",
+            "Decode with: cat ~/challenges/challenge3.txt | xxd -r -p"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "lvl-ctf-forensics",
+      "title": "Digital Forensics Basics",
+      "description": "Forensics challenges involve analyzing files, logs, and system artifacts to find hidden information.\n\n**Essential forensics commands:**\n\n1. **File analysis:**\n   - `file <filename>` \u2014 Identify file type (even with wrong extension)\n   - `strings <file>` \u2014 Extract readable strings from binary files\n   - `hexdump -C <file> | head` \u2014 View raw hex content\n\n2. **Log analysis:**\n   - `grep -i 'error\\|fail\\|denied' file.log` \u2014 Search for issues\n   - `awk '{print $1}' access.log | sort | uniq -c | sort -rn` \u2014 Count by field\n   - `tail -f /var/log/syslog` \u2014 Watch logs in real-time\n\n3. **System forensics:**\n   - `last` \u2014 Show recent logins\n   - `history` \u2014 Show command history\n   - `find / -mtime -1 -type f` \u2014 Files modified in the last day\n\n**The VM has clues scattered around the file system. Investigate!**",
+      "topology": {
+        "vms": [
+          {
+            "name": "forensics-lab",
+            "image": "ubuntu-20.04",
+            "memory": 1024,
+            "vcpus": 1,
+            "cloud_init": {
+              "username": "ctf",
+              "packages": "binutils",
+              "runcmd": [
+                "mkdir -p /home/ctf/evidence",
+                "echo 'access log for investigation' > /home/ctf/evidence/access.log",
+                "echo '192.168.1.100 - - [01/Jan/2025:10:00:00] \"GET / HTTP/1.1\" 200 1234' >> /home/ctf/evidence/access.log",
+                "echo '192.168.1.100 - - [01/Jan/2025:10:01:00] \"GET /admin HTTP/1.1\" 403 567' >> /home/ctf/evidence/access.log",
+                "echo '10.0.0.50 - - [01/Jan/2025:10:02:00] \"POST /login HTTP/1.1\" 200 89' >> /home/ctf/evidence/access.log",
+                "echo '10.0.0.50 - - [01/Jan/2025:10:02:30] \"GET /dashboard HTTP/1.1\" 200 4567' >> /home/ctf/evidence/access.log",
+                "echo '192.168.1.200 - - [01/Jan/2025:10:05:00] \"GET /secret?flag=flag{log_detective} HTTP/1.1\" 200 100' >> /home/ctf/evidence/access.log",
+                "echo '10.0.0.50 - - [01/Jan/2025:10:10:00] \"GET /logout HTTP/1.1\" 302 0' >> /home/ctf/evidence/access.log",
+                "printf 'This is a normal text file...\\x00\\x00\\x00flag{strings_find_secrets}\\x00\\x00\\x00...with some hidden content' > /home/ctf/evidence/mystery_file.dat",
+                "chown -R ctf:ctf /home/ctf/evidence"
+              ]
+            }
+          }
+        ]
+      },
+      "tasks": [
+        {
+          "id": "t-log-flag",
+          "question": "Analyze ~/evidence/access.log. Find the flag hidden in one of the HTTP requests. (format: flag{...})",
+          "type": "flag",
+          "answer": "flag{log_detective}",
+          "hints": [
+            "Use grep to search for 'flag' in the log file",
+            "Run: grep 'flag' ~/evidence/access.log"
+          ]
+        },
+        {
+          "id": "t-strings-flag",
+          "question": "Use the 'strings' command on ~/evidence/mystery_file.dat to find the hidden flag.",
+          "type": "flag",
+          "answer": "flag{strings_find_secrets}",
+          "hints": [
+            "Run: strings ~/evidence/mystery_file.dat",
+            "The 'strings' command extracts readable text from binary data"
+          ]
+        },
+        {
+          "id": "t-suspicious-ip",
+          "question": "In the access log, which IP address tried to access /admin and got a 403 Forbidden? (just the IP)",
+          "type": "quiz",
+          "answer": "192.168.1.100",
+          "hints": [
+            "Look for HTTP status code 403 in the log",
+            "Run: grep '403' ~/evidence/access.log"
+          ]
+        }
+      ]
+    }
+  ]
+}

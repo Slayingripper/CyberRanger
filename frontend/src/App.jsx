@@ -15,9 +15,23 @@ const API_URL = getApiUrl();
 
 function AppContent() {
   const [activeTab, setActiveTab] = useState('dashboard');
+  const [visitedTabs, setVisitedTabs] = useState(new Set(['dashboard']));
   const [vms, setVms] = useState([]);
   const [deployments, setDeployments] = useState({});
   const [loading, setLoading] = useState(false);
+
+  const switchTab = (tab) => {
+    setActiveTab(tab);
+    setVisitedTabs(prev => {
+      if (prev.has(tab)) return prev;
+      const next = new Set(prev);
+      next.add(tab);
+      return next;
+    });
+    // Let the DOM update (display:none → visible) then nudge ResizeObservers
+    // so components like ReactFlow re-measure their containers.
+    requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
+  };
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [activeConsole, setActiveConsole] = useState(null);
   const [topologyToView, setTopologyToView] = useState(null);
@@ -74,11 +88,11 @@ function AppContent() {
           <span className="text-xl font-bold text-primary">CyberRange</span>
         </div>
         <nav className="flex-1 p-4 space-y-2">
-          <SidebarItem icon={<Monitor />} label="Dashboard" active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} />
-          <SidebarItem icon={<HardDrive />} label="Images" active={activeTab === 'images'} onClick={() => setActiveTab('images')} />
-          <SidebarItem icon={<Network />} label="Topology Builder" active={activeTab === 'builder'} onClick={() => setActiveTab('builder')} />
-          <SidebarItem icon={<BookOpen />} label="Training" active={activeTab === 'training'} onClick={() => setActiveTab('training')} />
-          <SidebarItem icon={<SettingsIcon />} label="Settings" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
+          <SidebarItem icon={<Monitor />} label="Dashboard" active={activeTab === 'dashboard'} onClick={() => switchTab('dashboard')} />
+          <SidebarItem icon={<HardDrive />} label="Images" active={activeTab === 'images'} onClick={() => switchTab('images')} />
+          <SidebarItem icon={<Network />} label="Topology Builder" active={activeTab === 'builder'} onClick={() => switchTab('builder')} />
+          <SidebarItem icon={<BookOpen />} label="Training" active={activeTab === 'training'} onClick={() => switchTab('training')} />
+          <SidebarItem icon={<SettingsIcon />} label="Settings" active={activeTab === 'settings'} onClick={() => switchTab('settings')} />
         </nav>
       </div>
 
@@ -89,23 +103,31 @@ function AppContent() {
         </header>
         
         <main className="p-6">
-          {activeTab === 'dashboard' && (
+          <div style={{ display: activeTab === 'dashboard' ? undefined : 'none' }}>
             <Dashboard 
               vms={vms} 
-              deployments={deployments} // Pass deployments
+              deployments={deployments}
               onStart={handleStartVM} 
               onStop={handleStopVM} 
               onDelete={handleDeleteVM}
-              onRefresh={fetchData} // Use fetchData
+              onRefresh={fetchData}
               onCreate={() => setShowCreateModal(true)}
               onOpenConsole={(vm) => setActiveConsole({ host: 'localhost', port: vm.vnc_port, name: vm.name })}
               onViewTopology={(topology) => setTopologyToView(topology)}
             />
-          )}
-          {activeTab === 'images' && <Images />}
-          {activeTab === 'builder' && <NetworkBuilder />}
-          {activeTab === 'training' && <Training />}
-          {activeTab === 'settings' && <Settings />}
+          </div>
+          <div style={{ display: activeTab === 'images' ? undefined : 'none' }}>
+            {visitedTabs.has('images') && <Images />}
+          </div>
+          <div style={{ display: activeTab === 'builder' ? undefined : 'none' }}>
+            {visitedTabs.has('builder') && <NetworkBuilder />}
+          </div>
+          <div style={{ display: activeTab === 'training' ? undefined : 'none' }}>
+            {visitedTabs.has('training') && <Training />}
+          </div>
+          <div style={{ display: activeTab === 'settings' ? undefined : 'none' }}>
+            {visitedTabs.has('settings') && <Settings />}
+          </div>
         </main>
       </div>
 

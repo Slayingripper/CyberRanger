@@ -831,7 +831,9 @@ const NetworkBuilder = () => {
                   cpu: n.data.cpu,
                   ram: n.data.ram,
                   assets: n.data.assets,
-                  automation: n.data.automation || null
+                  automation: n.data.automation || null,
+                  username: n.data.username || null,
+                  password: n.data.password || null
               }
           })),
           edges: edges.map(e => ({
@@ -988,6 +990,7 @@ const NetworkBuilder = () => {
                                     };
                                     const percent = pctMap[status] ?? 0;
 
+                                    const creds = n?.credentials;
                                     return (
                                         <div key={id} className="bg-surface border border-border rounded p-2">
                                             <div className="flex items-center justify-between text-xs">
@@ -995,6 +998,12 @@ const NetworkBuilder = () => {
                                                 <div className={`ml-2 ${status === 'error' ? 'text-red-300' : 'text-secondary'}`}>{status}</div>
                                             </div>
                                             {msg && <div className="text-xs text-red-300 mt-1 truncate" title={msg}>{msg}</div>}
+                                            {creds?.username && creds?.password && (
+                                                <div className="text-xs bg-blue-900/40 text-blue-300 px-2 py-1 rounded mt-1 flex items-center gap-3">
+                                                    <span>Login: <code className="bg-background px-1 py-0.5 rounded font-mono">{creds.username}</code></span>
+                                                    <span>Pass: <code className="bg-background px-1 py-0.5 rounded font-mono">{creds.password}</code></span>
+                                                </div>
+                                            )}
                                             <div className="mt-2 h-2 w-full bg-surfaceHover rounded overflow-hidden">
                                                 <div
                                                     className={status === 'error' ? 'h-2 bg-red-600' : 'h-2 bg-green-600'}
@@ -1296,6 +1305,33 @@ const NetworkBuilder = () => {
                                     className="w-full bg-surface border border-border rounded p-2 text-primary focus:border-accent outline-none"
                                 />
                             </div>
+                        </div>
+
+                        <div className="border-t border-border pt-4">
+                            <label className="block text-sm text-secondary mb-2">VM Credentials</label>
+                            <div className="grid grid-cols-2 gap-2 mb-4">
+                                <div>
+                                    <label className="block text-xs text-secondary mb-1">Username</label>
+                                    <input
+                                        type="text"
+                                        value={selectedNode.data.username || ''}
+                                        onChange={(e) => updateNodeData('username', e.target.value)}
+                                        placeholder="trainee"
+                                        className="w-full bg-surface border border-border rounded p-2 text-sm text-primary focus:border-accent outline-none"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-xs text-secondary mb-1">Password</label>
+                                    <input
+                                        type="text"
+                                        value={selectedNode.data.password || ''}
+                                        onChange={(e) => updateNodeData('password', e.target.value)}
+                                        placeholder="auto-generated"
+                                        className="w-full bg-surface border border-border rounded p-2 text-sm text-primary focus:border-accent outline-none"
+                                    />
+                                </div>
+                            </div>
+                            <p className="text-xs text-secondary italic mb-4">Leave blank to auto-generate</p>
                         </div>
 
                         <div className="border-t border-border pt-4">

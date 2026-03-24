@@ -16,22 +16,71 @@ router = APIRouter()
 TRAININGS_DIR = os.path.join(WORK_DIR, "trainings")
 os.makedirs(TRAININGS_DIR, exist_ok=True)
 
+CREDS_CACHE_PATH = os.path.join(WORK_DIR, "data", "vm_credentials.json")
 
-def _resolve_training_image_path(image_key: str) -> str:
-    images_dir = os.path.join(WORK_DIR, "images")
-    image_map = {
-        "ubuntu-20.04": "focal-server-cloudimg-amd64.img",
-        "kali-linux": "kali-linux-2025.4-qemu-amd64.qcow2",
-    }
 
+def _load_creds_cache() -> Dict[str, Dict[str, str]]:
+    """Load cached VM credentials from disk."""
+    try:
+        with open(CREDS_CACHE_PATH, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_creds_cache(cache: Dict[str, Dict[str, str]]) -> None:
+    os.makedirs(os.path.dirname(CREDS_CACHE_PATH), exist_ok=True)
+    with open(CREDS_CACHE_PATH, "w") as f:
+        json.dump(cache, f)
+
+
+IMAGE_ALIASES = {
+    "ubuntu-20.04": "focal-server-cloudimg-amd64.img",
+    "kali-linux": "kali-linux-2025.4-qemu-amd64.qcow2",
+}
+
+IMAGE_DOWNLOAD_SOURCES = {
+    "focal-server-cloudimg-amd64.img": {
+        "url": "https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-amd64.img",
+        "filename": "focal-server-cloudimg-amd64.img",
+    },
+    "kali-linux-2025.4-qemu-amd64.qcow2": {
+        "url": "https://cdimage.kali.org/kali-2025.1/kali-linux-2025.1-qemu-amd64.7z",
+        "filename": "kali-linux-2025.1-qemu-amd64.7z",
+        "extract": {
+            "type": "7z",
+            "output_filename": "kali-linux-2025.4-qemu-amd64.qcow2",
+        },
+    },
+}
+
+
+def _resolve_image_filename(image_key: str) -> str:
+    """Return the expected local filename for an image alias or raw key."""
     if image_key.endswith(".qcow2") or image_key.endswith(".img") or image_key.endswith(".iso"):
-        return os.path.join(images_dir, image_key)
-
-    mapped = image_map.get(image_key)
+        return image_key
+    mapped = IMAGE_ALIASES.get(image_key)
     if mapped:
-        return os.path.join(images_dir, mapped)
+        return mapped
+    return f"{image_key}.qcow2"
 
-    return os.path.join(images_dir, f"{image_key}.qcow2")
+
+async def _resolve_training_image_path(image_key: str) -> str:
+    images_dir = os.path.join(WORK_DIR, "images")
+    filename = _resolve_image_filename(image_key)
+    full_path = os.path.join(images_dir, filename)
+
+    if os.path.exists(full_path):
+        return full_path
+
+    # Try to auto-download the image
+    source = IMAGE_DOWNLOAD_SOURCES.get(filename)
+    if source:
+        print(f"[trainings] Image {filename} not found locally, downloading...")
+        result = await ensure_image(source)
+        return result.container_path
+
+    return full_path
 
 class Task(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -131,11 +180,23 @@ async def deploy_level(training_id: str, level_idx: int):
     sources = training.get("sources") or {}
     vms = topology.get('vms', [])
     results = []
+
+    # Check which VMs already exist to avoid duplicates
+    existing_domains = {d['name']: d for d in vm_manager.list_domains()}
+    creds_cache = _load_creds_cache()
     
     for vm_conf in vms:
-        # Sanitize name
+        # Sanitize name — training-scoped (no level index) so VMs persist across levels
         safe_name = "".join(c for c in vm_conf.get('name', 'vm') if c.isalnum())
-        name = f"t{training_id[:8]}_l{level_idx}_{safe_name}"
+        name = f"t{training_id[:8]}_{safe_name}"
+
+        # If VM already exists, return its info instead of creating a duplicate
+        if name in existing_domains:
+            existing = existing_domains[name]
+            creds = creds_cache.get(name)
+            existing['credentials'] = creds
+            results.append({"name": name, "status": "existing", "details": existing, "credentials": creds})
+            continue
         
         image = vm_conf.get('image')
         image_path: Optional[str] = None
@@ -145,7 +206,7 @@ async def deploy_level(training_id: str, level_idx: int):
                 ensured = await ensure_image(src)
                 image_path = ensured.container_path
             else:
-                image_path = _resolve_training_image_path(str(image))
+                image_path = await _resolve_training_image_path(str(image))
 
         cloud_init = None
         if isinstance(vm_conf.get("cloud_init"), dict):
@@ -164,7 +225,10 @@ async def deploy_level(training_id: str, level_idx: int):
                 cloud_init=cloud_init,
                 network_name="default"
             )
-            results.append({"name": name, "status": "created", "details": res, "credentials": cloud_init_credentials(cloud_init)})
+            creds = cloud_init_credentials(cloud_init)
+            if creds:
+                creds_cache[name] = creds
+            results.append({"name": name, "status": "created", "details": res, "credentials": creds})
             try:
                 # Start console streaming to EventBus for runs associated with this training/level
                 vm_manager.start_console_stream(name, training_id, level_idx)
@@ -172,6 +236,7 @@ async def deploy_level(training_id: str, level_idx: int):
                 pass
         except Exception as e:
             results.append({"name": name, "status": "error", "error": str(e)})
+    _save_creds_cache(creds_cache)
     # publish event to any matching runs
     await event_bus.publish_by_definition_level(training_id, level_idx, {"type": "deploy", "ts": time.time(), "result": results})
 
@@ -199,10 +264,19 @@ async def destroy_level(training_id: str, level_idx: int):
     if not vm_manager.conn:
         vm_manager.connect()
 
+    # Collect VM names from ALL levels so we destroy everything for this training
+    all_vm_names = set()
+    for lvl in training.get('levels', []):
+        topo = lvl.get('topology')
+        if not topo:
+            continue
+        for vm_conf in topo.get('vms', []):
+            safe_name = "".join(c for c in vm_conf.get('name', 'vm') if c.isalnum())
+            all_vm_names.add(f"t{training_id[:8]}_{safe_name}")
+
     results = []
-    for vm_conf in vms:
-        safe_name = "".join(c for c in vm_conf.get('name', 'vm') if c.isalnum())
-        name = f"t{training_id[:8]}_l{level_idx}_{safe_name}"
+    creds_cache = _load_creds_cache()
+    for name in all_vm_names:
         try:
             if vm_manager.conn:
                 dom = vm_manager.conn.lookupByName(name)
@@ -210,12 +284,14 @@ async def destroy_level(training_id: str, level_idx: int):
                     dom.destroy()
                 dom.undefine()
                 results.append(name)
+                creds_cache.pop(name, None)
                 try:
                     vm_manager.stop_console_stream(name)
                 except Exception:
                     pass
         except Exception:
             pass
+    _save_creds_cache(creds_cache)
     await event_bus.publish_by_definition_level(training_id, level_idx, {"type": "destroy", "ts": time.time(), "result": results})
     return {"status": "destroyed", "vms": results}
 
@@ -241,18 +317,24 @@ async def level_status(training_id: str, level_idx: int):
     
     domains = vm_manager.list_domains()
     
+    creds_cache = _load_creds_cache()
+
     for vm_conf in vms:
         safe_name = "".join(c for c in vm_conf.get('name', 'vm') if c.isalnum())
-        name = f"t{training_id[:8]}_l{level_idx}_{safe_name}"
+        name = f"t{training_id[:8]}_{safe_name}"
+        
+        # Retrieve credentials from cache (set at deploy time)
+        creds = creds_cache.get(name)
         
         found = False
         for d in domains:
             if d['name'] == name:
+                d['credentials'] = creds
                 vm_statuses.append(d)
                 found = True
                 break
         if not found:
-            vm_statuses.append({"name": name, "state": 0, "state_desc": "shut off"})
+            vm_statuses.append({"name": name, "state": 0, "state_desc": "shut off", "credentials": creds})
             
     return {"vms": vm_statuses}
 

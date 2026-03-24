@@ -48,7 +48,7 @@ def generate_guest_password() -> str:
     override = os.environ.get("CYBERANGE_DEFAULT_VM_PASSWORD")
     if override:
         return override
-    return secrets.token_hex(12)
+    return secrets.token_hex(4)
 
 
 def ensure_cloud_init_defaults(cloud_init: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

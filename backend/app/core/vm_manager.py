@@ -5,6 +5,7 @@ import subprocess
 import json
 import ipaddress
 import xml.etree.ElementTree as ET
+import yaml
 from typing import List, Dict, Optional, Any
 import threading
 import time
@@ -296,29 +297,40 @@ class VMManager:
                         </disk>
                         """
                         if cloud_init:
-                                user_data = f"""#cloud-config
-hostname: {name}
-manage_etc_hosts: true
-apt_update: true
-apt_upgrade: false
-users:
-    - name: {cloud_init.get('username', 'user')}
-        passwd: {cloud_init.get('password', 'password')}
-        groups: users, admin
-        sudo: ALL=(ALL) NOPASSWD:ALL
-        shell: /bin/bash
-        lock_passwd: false
-ssh_pwauth: true
-chpasswd:
-    expire: false
-    list: |
-        {cloud_init.get('username', 'user')}:{cloud_init.get('password', 'password')}
-packages:
-{cloud_init.get('packages', '')}
-runcmd:
-{chr(10).join([f"  - {cmd}" for cmd in cloud_init.get('runcmd', [])])}
-    - echo "Cloud-init finished"
-"""
+                                ci_username = cloud_init.get('username', 'user')
+                                ci_password = cloud_init.get('password', 'password')
+                                # Parse packages from newline-separated string
+                                raw_pkgs = cloud_init.get('packages', '')
+                                packages = [p.strip() for p in raw_pkgs.split('\n') if p.strip()] if raw_pkgs else []
+                                # Build runcmd list
+                                runcmd = [str(cmd) for cmd in cloud_init.get('runcmd', []) if cmd]
+                                runcmd.append('echo "Cloud-init finished"')
+                                # Build cloud-config as a dict and use yaml.dump for correctness
+                                cloud_config = {
+                                    'hostname': name,
+                                    'manage_etc_hosts': True,
+                                    'apt_update': True,
+                                    'apt_upgrade': False,
+                                    'users': [{
+                                        'name': ci_username,
+                                        'groups': 'users, admin, sudo',
+                                        'sudo': 'ALL=(ALL) NOPASSWD:ALL',
+                                        'shell': '/bin/bash',
+                                        'lock_passwd': False,
+                                        'plain_text_passwd': ci_password,
+                                    }],
+                                    'ssh_pwauth': True,
+                                    'chpasswd': {
+                                        'expire': False,
+                                        'list': f'{ci_username}:{ci_password}',
+                                    },
+                                    'password': ci_password,
+                                }
+                                if packages:
+                                    cloud_config['packages'] = packages
+                                if runcmd:
+                                    cloud_config['runcmd'] = runcmd
+                                user_data = '#cloud-config\n' + yaml.dump(cloud_config, default_flow_style=False, sort_keys=False)
                                 meta_data = f"instance-id: {name}\nlocal-hostname: {name}"
                                 cidata_iso = self.create_cloud_init_iso(name, user_data, meta_data)
                                 disk_xml += f"""

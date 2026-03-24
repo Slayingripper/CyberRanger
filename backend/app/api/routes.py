@@ -404,6 +404,9 @@ class TopologyNodeConfig(BaseModel):
     assets: List[Dict[str, str]]
     # Optional automation hooks for ISO installs (e.g., send keys/text).
     automation: Optional[Dict[str, Any]] = None
+    # Optional user-specified credentials (override auto-generated ones)
+    username: Optional[str] = None
+    password: Optional[str] = None
 
 class Position(BaseModel):
     x: float
@@ -760,6 +763,11 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest):
             await set_progress_path(job_id, f"nodes.{node.id}.status", "creating")
 
             cloud_init = build_cloud_init_from_assets(node.config.assets)
+            # Apply user-specified credentials if provided
+            if node.config.username:
+                cloud_init["username"] = node.config.username
+            if node.config.password:
+                cloud_init["password"] = node.config.password
 
             # Resolve/ensure image path
             image_path: Optional[str] = None

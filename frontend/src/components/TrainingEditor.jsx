@@ -21,7 +21,8 @@ function TrainingEditor({ training, onSave, onCancel }) {
         id: Date.now().toString(), 
         title: 'New Level', 
         description: '', 
-        vm_config: { image: 'ubuntu-20.04', cpu: 2, ram: 2048 },
+        vm_config: { image: 'ubuntu-20.04', vcpus: 2, memory: 2048 },
+        topology: { vms: [] },
         tasks: [] 
     };
     const newLevels = [...editedTraining.levels, newLevel];
@@ -244,8 +245,8 @@ function TrainingEditor({ training, onSave, onCancel }) {
                                     <label className="block text-sm font-medium text-secondary mb-2">CPU Cores</label>
                                     <input 
                                         type="number"
-                                        value={editedTraining.levels[activeView].vm_config?.cpu || 2}
-                                        onChange={e => handleLevelChange(activeView, 'vm_config', { ...editedTraining.levels[activeView].vm_config, cpu: parseInt(e.target.value) })}
+                                        value={editedTraining.levels[activeView].vm_config?.vcpus || 2}
+                                        onChange={e => handleLevelChange(activeView, 'vm_config', { ...editedTraining.levels[activeView].vm_config, vcpus: parseInt(e.target.value) })}
                                         className="w-full bg-background border border-border rounded-lg p-3 text-primary focus:border-accent outline-none transition-colors"
                                     />
                                 </div>
@@ -253,8 +254,8 @@ function TrainingEditor({ training, onSave, onCancel }) {
                                     <label className="block text-sm font-medium text-secondary mb-2">RAM (MB)</label>
                                     <input 
                                         type="number"
-                                        value={editedTraining.levels[activeView].vm_config?.ram || 2048}
-                                        onChange={e => handleLevelChange(activeView, 'vm_config', { ...editedTraining.levels[activeView].vm_config, ram: parseInt(e.target.value) })}
+                                        value={editedTraining.levels[activeView].vm_config?.memory || 2048}
+                                        onChange={e => handleLevelChange(activeView, 'vm_config', { ...editedTraining.levels[activeView].vm_config, memory: parseInt(e.target.value) })}
                                         className="w-full bg-background border border-border rounded-lg p-3 text-primary focus:border-accent outline-none transition-colors"
                                     />
                                 </div>
@@ -325,14 +326,14 @@ function TrainingEditor({ training, onSave, onCancel }) {
                                         <div>
                                             <label className="block text-xs font-medium text-secondary mb-1 uppercase tracking-wider">Hints (Optional)</label>
                                             <div className="flex gap-2">
-                                                <input 
-                                                    value={task.hints.join(', ')}
-                                                    onChange={e => updateTask(activeView, tIdx, 'hints', e.target.value.split(', '))}
-                                                    placeholder="Comma separated hints..."
-                                                    className="flex-1 bg-background border border-border rounded-lg p-3 text-sm text-primary focus:border-accent outline-none transition-colors"
+                                                <textarea 
+                                                    value={(task.hints || []).join('\n')}
+                                                    onChange={e => updateTask(activeView, tIdx, 'hints', e.target.value.split('\n').filter(h => h.trim()))}
+                                                    placeholder="One hint per line..."
+                                                    className="flex-1 bg-background border border-border rounded-lg p-3 text-sm text-primary focus:border-accent outline-none transition-colors min-h-[60px]"
                                                 />
                                             </div>
-                                            <p className="text-[10px] text-secondary mt-1">Separate multiple hints with commas.</p>
+                                            <p className="text-[10px] text-secondary mt-1">One hint per line.</p>
                                         </div>
                                     </div>
                                 </div>
