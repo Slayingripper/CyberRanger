@@ -7,6 +7,11 @@ disks/*
 # Python bytecode
 **/__pycache__/
 *.py[cod]
+.pytest_cache/
+backend/.pytest_cache/
 
 # Generated runtime artifacts
 backend/training_runs/
+backend/deployments.json
+backend/topology_cache.json
+backend/data/vm_credentials.json

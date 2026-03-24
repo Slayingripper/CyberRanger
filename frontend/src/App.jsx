@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Terminal, Play, Square, Plus, Monitor, Settings as SettingsIcon, Network, HardDrive, BookOpen } from 'lucide-react';
+import { Play, Square, Plus, Monitor, Settings as SettingsIcon, Network, HardDrive, BookOpen } from 'lucide-react';
 import axios from 'axios';
 import { getApiUrl } from './lib/api';
 import Images from './components/Images';
@@ -84,7 +84,7 @@ function AppContent() {
       const res = await axios.post(`${API_URL}/networks/cleanup`);
       await fetchData();
       const count = Number(res.data?.count || 0);
-      window.alert(count > 0 ? `Removed ${count} orphaned network${count === 1 ? '' : 's'}.` : 'No orphaned CyberRange networks found.');
+      window.alert(count > 0 ? `Removed ${count} orphaned network${count === 1 ? '' : 's'}.` : 'No orphaned CyberRanger networks found.');
     } catch (error) {
       window.alert(`Failed to clean networks: ${error.response?.data?.detail || error.message}`);
     }
@@ -94,9 +94,9 @@ function AppContent() {
     <div className="flex h-screen font-sans">
       {/* Sidebar */}
       <div className="w-64 bg-surface border-r border-border flex flex-col">
-        <div className="p-6 flex items-center space-x-2 border-b border-border">
-          <Terminal className="text-accent" />
-          <span className="text-xl font-bold text-primary">CyberRange</span>
+        <div className="p-6 flex items-center space-x-3 border-b border-border">
+          <img src="/cyberranger.jpg" alt="CyberRanger logo" className="h-12 w-12 rounded-lg object-cover border border-border" />
+          <span className="text-xl font-bold text-primary">CyberRanger</span>
         </div>
         <nav className="flex-1 p-4 space-y-2">
           <SidebarItem icon={<Monitor />} label="Dashboard" active={activeTab === 'dashboard'} onClick={() => switchTab('dashboard')} />

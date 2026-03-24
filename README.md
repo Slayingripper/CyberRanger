@@ -1,6 +1,10 @@
-# CyberRange ANU
+<p align="center">
+   <img src="frontend/public/cyberranger.jpg" alt="CyberRanger logo" width="320" />
+</p>
 
-A lightweight, scalable Cyber Range platform using QEMU/KVM and a modern web interface.
+# CyberRanger
+
+A lightweight, No B.S., scalable Cyber Range platform using QEMU/KVM and a modern web interface.
 
 > **📚 [Complete Documentation Available in the Wiki](docs/wiki/Home.md)**
 
@@ -20,8 +24,8 @@ A lightweight, scalable Cyber Range platform using QEMU/KVM and a modern web int
 
 1. **Clone the repository**
    ```bash
-   git clone <repo_url>
-   cd CyberangeANU
+   git clone https://github.com/Slayingripper/CyberRanger
+   cd CyberRanger
    ```
 
 2. **Start the platform**
@@ -98,3 +102,11 @@ Comprehensive documentation is available in the [Wiki](docs/wiki/):
 - **Permission Denied**: If the backend cannot connect to libvirt, ensure the socket permissions are correct or run docker-compose with `sudo`.
 - **NoVNC**: Ensure ports 6080-6100 are available.
 - **WebSocket Errors**: If you see “Unsupported upgrade request,” ensure the backend image was rebuilt after updating dependencies.
+
+## TODO
+- [ ] Add user authentication and role-based access control.
+- [ ] Implement scenario sharing and export/import functionality.
+- [ ] Fix clipboard sync issues in NoVNC.
+- [ ] Allow custom network configurations (e.g. multiple interfaces, VLANs).
+- [ ] Add llm-based scenario generation and hints via OLLAMA integration.
+- [ ] Dynamic URL linking for ISO assets in scenario definitions.

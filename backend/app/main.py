@@ -8,7 +8,7 @@ from app.api.proxy import router as proxy_router
 from app.api.range_mapper import router as range_mapper_router
 from app.core.vm_manager import vm_manager
 
-app = FastAPI(title="CyberRange API")
+app = FastAPI(title="CyberRanger API")
 
 # Configure CORS
 app.add_middleware(
@@ -37,4 +37,4 @@ async def shutdown_event():
 
 @app.get("/")
 async def root():
-    return {"message": "CyberRange API is running"}
+    return {"message": "CyberRanger API is running"}
