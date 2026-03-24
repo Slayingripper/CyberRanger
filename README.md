@@ -4,7 +4,7 @@
 
 # CyberRanger
 
-A lightweight, No B.S., scalable Cyber Range platform using QEMU/KVM and a modern web interface.
+A lightweight, No B.S., scalable Cyber Range platform using QEMU/KVM.
 
 > **📚 [Complete Documentation Available in the Wiki](docs/wiki/Home.md)**
 
@@ -20,6 +20,34 @@ A lightweight, No B.S., scalable Cyber Range platform using QEMU/KVM and a moder
 - KVM/QEMU installed on the host (`sudo apt install qemu-kvm libvirt-daemon-system libvirt-clients bridge-utils`)
 - Current user in `libvirt` and `kvm` groups (`sudo usermod -aG libvirt,kvm $USER`)
 
+### Dashboard
+![Dashboard Screenshot](images/1.png)
+
+## VM Image Management
+![Image Management Screenshot](images/2.png)
+- Images are stored in `./images` on the host (bind-mounted to `/app/images
+- Scenarios can reference images by name (e.g. `image: ubuntu-2204`) or define sources for auto-downloading.
+## Topology Builder
+![Topology Builder Screenshot](images/3.png)
+- Drag-and-drop interface for designing network topologies.
+- Define node configurations, connections, and automation steps.
+- Supports multiple node types (e.g. servers, workstations, firewalls) with customizable resources.
+- Automate interactions with VMs using scripted steps (e.g. send keystrokes, wait for output).
+- Real-time console access via NoVNC for each node.
+
+## Training System
+![Training System Screenshot](images/4.png)
+- Create training courses with multiple scenarios.
+- Each scenario can have its own topology, objectives, and difficulty level.
+- Track learner progress and provide hints or solutions.
+- Ideal for CTFs, workshops, or self-paced learning.
+
+### Training Course Example
+
+![Course Screenshot](images/5.png)
+
+
+
 ## Quick Start
 
 1. **Clone the repository**
@@ -30,7 +58,7 @@ A lightweight, No B.S., scalable Cyber Range platform using QEMU/KVM and a moder
 
 2. **Start the platform**
    ```bash
-   docker-compose up --build
+   docker compose up --build
    ```
 
 3. **Access the Interface**
