@@ -431,6 +431,74 @@ const NetworkBuilder = () => {
       }
   }, [nodes, edges, scenarioConfig, reactFlowInstance]);
 
+  const buildTopologyPayload = () => ({
+      scenario: scenarioConfig,
+      nodes: nodes.map(n => ({
+          id: n.id,
+          label: n.data.label,
+          position: n.position,
+          config: {
+              image: n.data.image,
+              cpu: n.data.cpu,
+              ram: n.data.ram,
+              assets: n.data.assets,
+              automation: n.data.automation || null,
+              username: n.data.username || null,
+              password: n.data.password || null
+          }
+      })),
+      edges: edges.map(e => ({
+          id: e.id,
+          source: e.source,
+          target: e.target
+      }))
+  });
+
+  const handleClearTopology = async () => {
+      setNodes([]);
+      setEdges([]);
+      setSelectedNode(null);
+      setScenarioConfig({ ...SCENARIO_DEFAULTS });
+      localStorage.removeItem('networkTopology');
+      localStorage.removeItem('deployJobId');
+      setDeployJob(null);
+      setDeployJobId(null);
+      setDeployJobError(null);
+      try {
+          await axios.post(`${API_URL}/topology/cache`, {});
+      } catch (err) {
+          // Best-effort cache clear only.
+      }
+      setTimeout(() => reactFlowInstance?.fitView(), 50);
+      setMessageModal({ isOpen: true, title: 'Cleared', message: 'Topology cleared.', type: 'success' });
+  };
+
+  const handleSaveTopology = async () => {
+      const topology = buildTopologyPayload();
+      const viewport = reactFlowInstance ? reactFlowInstance.getViewport() : null;
+      const cachedTopology = { ...topology, viewport };
+      localStorage.setItem('networkTopology', JSON.stringify(cachedTopology));
+      try {
+          await axios.post(`${API_URL}/topology/cache`, cachedTopology);
+      } catch (err) {
+          // Local save still succeeds even if backend cache fails.
+      }
+
+      const yamlPayload = yaml.dump(topology, { noRefs: true });
+      const blob = new Blob([yamlPayload], { type: 'text/yaml;charset=utf-8' });
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const baseName = (scenarioConfig.name || 'topology').trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'topology';
+      link.href = downloadUrl;
+      link.download = `${baseName}.yaml`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(downloadUrl);
+
+      setMessageModal({ isOpen: true, title: 'Saved', message: `Topology saved as ${baseName}.yaml`, type: 'success' });
+  };
+
   // Save viewport on page unload/visibility change
   useEffect(() => {
       const saveViewport = () => {
@@ -820,28 +888,7 @@ const NetworkBuilder = () => {
       }
 
       // Construct topology payload
-      const topology = {
-          scenario: scenarioConfig,
-          nodes: nodes.map(n => ({
-              id: n.id,
-              label: n.data.label,
-              position: n.position,
-              config: {
-                  image: n.data.image,
-                  cpu: n.data.cpu,
-                  ram: n.data.ram,
-                  assets: n.data.assets,
-                  automation: n.data.automation || null,
-                  username: n.data.username || null,
-                  password: n.data.password || null
-              }
-          })),
-          edges: edges.map(e => ({
-              id: e.id,
-              source: e.source,
-              target: e.target
-          }))
-      };
+      const topology = buildTopologyPayload();
       
       console.log("Deploying topology:", topology);
       
@@ -897,6 +944,14 @@ const NetworkBuilder = () => {
 
             <button onClick={() => setShowScenarioSettings(true)} className="flex items-center gap-2 bg-accent/30 hover:bg-accent border border-accent px-3 py-1.5 rounded text-sm transition-colors text-accent">
                 <Target size={14} /> Scenario Settings
+            </button>
+
+            <button onClick={handleSaveTopology} className="flex items-center gap-2 bg-surfaceHover hover:bg-surface px-3 py-1.5 rounded text-sm transition-colors text-primary">
+                <FileText size={14} /> Save Topology
+            </button>
+
+            <button onClick={handleClearTopology} className="flex items-center gap-2 bg-red-900/30 hover:bg-red-900/50 border border-red-800 px-3 py-1.5 rounded text-sm transition-colors text-red-200">
+                <Trash2 size={14} /> Clear Topology
             </button>
         </div>
 

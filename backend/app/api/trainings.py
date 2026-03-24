@@ -292,6 +292,10 @@ async def destroy_level(training_id: str, level_idx: int):
         except Exception:
             pass
     _save_creds_cache(creds_cache)
+    try:
+        vm_manager.cleanup_unused_networks()
+    except Exception:
+        pass
     await event_bus.publish_by_definition_level(training_id, level_idx, {"type": "destroy", "ts": time.time(), "result": results})
     return {"status": "destroyed", "vms": results}
 
@@ -366,12 +370,39 @@ async def upload_training(file: UploadFile = File(...)):
 
 @router.post("/debug/trainings/{training_id}/levels/{level_idx}/console")
 async def debug_console_event(training_id: str, level_idx: int, payload: Dict[str, Any]):
-    """Debug helper: inject a console event for a training/level to exercise the event bus."""
+    """Send text to running training VMs and publish matching console events."""
     msg = payload.get("msg") if isinstance(payload, dict) else None
     if not msg:
         raise HTTPException(status_code=400, detail="msg required")
+
+    file_path = os.path.join(TRAININGS_DIR, f"{training_id}.json")
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Training not found")
+
+    with open(file_path, "r") as file:
+        training = json.load(file)
+
+    levels = training.get("levels", [])
+    if level_idx >= len(levels):
+        raise HTTPException(status_code=404, detail="Level not found")
+
+    vm_defs = (levels[level_idx].get("topology") or {}).get("vms") or []
+    if not vm_defs:
+        raise HTTPException(status_code=400, detail="No VMs defined for this level")
+
+    sent_to = []
+    for vm_conf in vm_defs:
+        safe_name = "".join(c for c in vm_conf.get("name", "vm") if c.isalnum())
+        vm_name = f"t{training_id[:8]}_{safe_name}"
+        if vm_manager.send_text(vm_name, f"{msg}\n"):
+            sent_to.append(vm_name)
+
+    if not sent_to:
+        raise HTTPException(status_code=404, detail="No running training VM accepted console input")
+
     try:
-        await event_bus.publish_by_definition_level(training_id, level_idx, {"type": "console", "vm": "debug", "msg": msg, "ts": time.time()})
-        return {"status": "ok"}
+        for vm_name in sent_to:
+            await event_bus.publish_by_definition_level(training_id, level_idx, {"type": "console", "vm": vm_name, "msg": msg, "ts": time.time()})
+        return {"status": "ok", "sent_to": sent_to}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

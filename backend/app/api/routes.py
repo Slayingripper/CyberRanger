@@ -20,6 +20,7 @@ router = APIRouter()
 
 TOPOLOGY_CACHE_FILE = os.path.join(WORK_DIR, "topology_cache.json")
 DEPLOYMENTS_FILE = os.path.join(WORK_DIR, "deployments.json")
+CREDS_CACHE_PATH = os.path.join(WORK_DIR, "data", "vm_credentials.json")
 
 def _load_topology_cache():
     if os.path.exists(TOPOLOGY_CACHE_FILE):
@@ -33,6 +34,14 @@ def _load_topology_cache():
 def _save_topology_cache(data):
     with open(TOPOLOGY_CACHE_FILE, "w") as f:
         json.dump(data, f)
+
+
+def _load_creds_cache():
+    try:
+        with open(CREDS_CACHE_PATH, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
 
 def _load_deployments():
     if os.path.exists(DEPLOYMENTS_FILE):
@@ -62,6 +71,10 @@ async def save_topology_cache(topology: Dict[str, Any]):
 @router.get("/deployments")
 async def get_deployments():
     deployments = _load_deployments()
+    try:
+        vm_manager.cleanup_unused_networks()
+    except Exception:
+        pass
     
     # Auto-cleanup: remove deployments that have no VMs present in the system
     # We do not want to remove just stopped VMs, but VMs that are completely deleted.
@@ -94,6 +107,15 @@ async def get_deployments():
         _save_deployments(deployments)
             
     return deployments
+
+
+@router.post("/networks/cleanup")
+async def cleanup_networks():
+    try:
+        removed = vm_manager.cleanup_unused_networks()
+        return {"status": "cleaned", "removed": removed, "count": len(removed)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # In-memory cache for last topology (best-effort; resets on restart)
 _TOPOLOGY_CACHE: Dict[str, Any] = {}
@@ -316,6 +338,7 @@ class VMResponse(BaseModel):
     vcpus: int
     vnc_port: Optional[str]
     websocket_port: Optional[int] = None
+    credentials: Optional[Dict[str, str]] = None
 
 
 class VMInterfaceInfo(BaseModel):
@@ -332,7 +355,11 @@ class VMRuntimeInfo(BaseModel):
 @router.get("/vms", response_model=List[VMResponse])
 async def get_vms():
     try:
-        return vm_manager.list_domains()
+        creds_cache = _load_creds_cache()
+        vms = vm_manager.list_domains()
+        for vm in vms:
+            vm["credentials"] = creds_cache.get(vm.get("name"))
+        return vms
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -362,6 +389,14 @@ async def create_vm(vm: VMCreateRequest):
     )
     if result["status"] == "error":
         raise HTTPException(status_code=400, detail=result["message"])
+    creds = cloud_init_credentials(vm.cloud_init)
+    if creds:
+        creds_cache = _load_creds_cache()
+        creds_cache[vm.name] = creds
+        os.makedirs(os.path.dirname(CREDS_CACHE_PATH), exist_ok=True)
+        with open(CREDS_CACHE_PATH, "w") as f:
+            json.dump(creds_cache, f)
+        result["credentials"] = creds
     return result
 
 @router.post("/vms/{name}/start")
@@ -379,6 +414,16 @@ async def stop_vm(name: str):
 @router.delete("/vms/{name}")
 async def delete_vm(name: str):
     if vm_manager.delete_vm(name):
+        creds_cache = _load_creds_cache()
+        if name in creds_cache:
+            del creds_cache[name]
+            os.makedirs(os.path.dirname(CREDS_CACHE_PATH), exist_ok=True)
+            with open(CREDS_CACHE_PATH, "w") as f:
+                json.dump(creds_cache, f)
+        try:
+            vm_manager.cleanup_unused_networks()
+        except Exception:
+            pass
         return {"status": "deleted"}
     raise HTTPException(status_code=404, detail="VM not found or could not be deleted")
 
@@ -467,6 +512,7 @@ class TopologyDeployRequest(BaseModel):
 @router.post("/topology/deploy")
 async def deploy_topology(topology: TopologyDeployRequest):
     results = []
+    creds_cache = _load_creds_cache()
     
     # Log scenario deployment
     if topology.scenario:
@@ -565,9 +611,16 @@ async def deploy_topology(topology: TopologyDeployRequest):
                 cloud_init=None if image_path.lower().endswith(".iso") else cloud_init,
                 network_names=nets,
             )
-            results.append({**res, "node": node.label, "credentials": None if image_path.lower().endswith(".iso") else cloud_init_credentials(cloud_init)})
+            creds = None if image_path.lower().endswith(".iso") else cloud_init_credentials(cloud_init)
+            if creds and res.get("status") == "success":
+                creds_cache[f"{safe_name}_{node.id}"] = creds
+            results.append({**res, "node": node.label, "credentials": creds})
         except Exception as e:
             results.append({"status": "error", "message": str(e), "node": node.label})
+
+    os.makedirs(os.path.dirname(CREDS_CACHE_PATH), exist_ok=True)
+    with open(CREDS_CACHE_PATH, "w") as f:
+        json.dump(creds_cache, f)
             
     return {"status": "deployment_processed", "results": results}
 
@@ -602,6 +655,7 @@ def _job_to_response(job) -> Dict[str, Any]:
 
 async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest):
     await update_job(job_id, status="running", started_at=time.time(), message="Starting deployment")
+    creds_cache = _load_creds_cache()
     await update_progress(
         job_id,
         {
@@ -827,8 +881,11 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest):
             results.append({**res, "node": node.label, "credentials": None if image_path.lower().endswith(".iso") else cloud_init_credentials(cloud_init)})
             if res.get("status") == "success":
                 await set_progress_path(job_id, f"nodes.{node.id}.status", "running")
+                if res.get("vnc_port"):
+                    await set_progress_path(job_id, f"nodes.{node.id}.vnc_port", res["vnc_port"])
                 creds = cloud_init_credentials(cloud_init)
                 if creds:
+                    creds_cache[f"{safe_name}_{node.id}"] = creds
                     await set_progress_path(job_id, f"nodes.{node.id}.credentials.username", creds["username"])
                     await set_progress_path(job_id, f"nodes.{node.id}.credentials.password", creds["password"])
 
@@ -846,6 +903,10 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest):
             else:
                 await set_progress_path(job_id, f"nodes.{node.id}.status", "error")
                 await set_progress_path(job_id, f"nodes.{node.id}.message", res.get("message") or "failed")
+
+        os.makedirs(os.path.dirname(CREDS_CACHE_PATH), exist_ok=True)
+        with open(CREDS_CACHE_PATH, "w") as f:
+            json.dump(creds_cache, f)
 
         # Save deployment record
         try:

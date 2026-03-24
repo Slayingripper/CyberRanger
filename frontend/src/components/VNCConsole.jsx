@@ -31,7 +31,7 @@ export default function VNCConsole({ host, port, vmName, onClose }) {
         });
         
         rfb.scaleViewport = true;
-        rfb.resizeSession = true;
+        rfb.resizeSession = false;
 
         rfbRef.current = rfb;
     } catch (err) {

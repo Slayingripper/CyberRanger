@@ -79,6 +79,17 @@ function AppContent() {
     setDeleteConfirm({ isOpen: false, vmName: null });
   };
 
+  const handleCleanupNetworks = async () => {
+    try {
+      const res = await axios.post(`${API_URL}/networks/cleanup`);
+      await fetchData();
+      const count = Number(res.data?.count || 0);
+      window.alert(count > 0 ? `Removed ${count} orphaned network${count === 1 ? '' : 's'}.` : 'No orphaned CyberRange networks found.');
+    } catch (error) {
+      window.alert(`Failed to clean networks: ${error.response?.data?.detail || error.message}`);
+    }
+  };
+
   return (
     <div className="flex h-screen font-sans">
       {/* Sidebar */}
@@ -111,6 +122,7 @@ function AppContent() {
               onStop={handleStopVM} 
               onDelete={handleDeleteVM}
               onRefresh={fetchData}
+              onCleanupNetworks={handleCleanupNetworks}
               onCreate={() => setShowCreateModal(true)}
               onOpenConsole={(vm) => setActiveConsole({ host: 'localhost', port: vm.vnc_port, name: vm.name })}
               onViewTopology={(topology) => setTopologyToView(topology)}
@@ -189,7 +201,7 @@ function SidebarItem({ icon, label, active, onClick }) {
   );
 }
 
-function Dashboard({ vms, deployments, onStart, onStop, onDelete, onRefresh, onCreate, onOpenConsole, onViewTopology }) {
+function Dashboard({ vms, deployments, onStart, onStop, onDelete, onRefresh, onCleanupNetworks, onCreate, onOpenConsole, onViewTopology }) {
   const groupedVMs = React.useMemo(() => {
     const groups = {};
     const deployedVMNames = new Set();
@@ -248,7 +260,15 @@ function Dashboard({ vms, deployments, onStart, onStop, onDelete, onRefresh, onC
             <span>VNC Port:</span>
             <span>{vm.vnc_port || 'N/A'}</span>
           </div>
-        </div>
+          {vm.credentials && vm.credentials.username && vm.credentials.password && (
+            <div className="border border-blue-800 bg-blue-950/20 rounded p-2">
+              <div className="text-xs text-blue-100 font-semibold">Credentials</div>
+              <div className="text-xs text-blue-200">User: <code className="bg-background px-1 rounded text-white">{vm.credentials.username}</code></div>
+              <div className="text-xs text-blue-200">Pass: <code className="bg-background px-1 rounded text-white">{vm.credentials.password}</code></div>
+            </div>
+          )}
+
+          </div>
 
         <div className="flex space-x-2">
           {vm.state !== 1 ? (
@@ -264,7 +284,7 @@ function Dashboard({ vms, deployments, onStart, onStop, onDelete, onRefresh, onC
             Delete
           </button>
         </div>
-        
+
         {vm.state === 1 && vm.vnc_port && (
            <button 
              onClick={() => onOpenConsole(vm)}
@@ -284,6 +304,7 @@ function Dashboard({ vms, deployments, onStart, onStop, onDelete, onRefresh, onC
              <div onClick={onCreate} className="cursor-pointer flex items-center gap-2 bg-accent hover:bg-accentHover text-primary px-4 py-2 rounded text-sm font-medium">
                 <Plus size={16} /> Create New VM
              </div>
+             <button onClick={onCleanupNetworks} className="bg-red-900/40 hover:bg-red-900/60 text-red-200 px-4 py-2 rounded text-sm">Cleanup Networks</button>
              <button onClick={onRefresh} className="bg-surfaceHover hover:opacity-80 text-primary px-4 py-2 rounded text-sm">Refresh</button>
         </div>
       </div>

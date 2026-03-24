@@ -387,11 +387,17 @@ class VMManager:
                         dom = self.conn.defineXML(xml)
                         if dom:
                                 dom.create()
+                                # Query assigned VNC port after start
+                                vnc_port = None
                                 try:
-                                        pass
+                                        xml_desc = dom.XMLDesc(0)
+                                        root = ET.fromstring(xml_desc)
+                                        graphics = root.find("./devices/graphics")
+                                        if graphics is not None and graphics.get('type') == 'vnc':
+                                                vnc_port = graphics.get('port')
                                 except Exception:
                                         pass
-                                return {"status": "success", "uuid": dom.UUIDString()}
+                                return {"status": "success", "uuid": dom.UUIDString(), "vnc_port": vnc_port}
                 except libvirt.libvirtError as e:
                         return {"status": "error", "message": str(e)}
                 return {"status": "error", "message": "Unknown error"}
@@ -672,6 +678,63 @@ class VMManager:
             return True
         except libvirt.libvirtError:
             return False
+
+    def cleanup_unused_networks(self, prefix: str = "cyberange-") -> List[str]:
+        if not self.conn:
+            self.connect()
+        if not self.conn:
+            return []
+
+        referenced_networks = set()
+        try:
+            for domain_id in self.conn.listDomainsID():
+                dom = self.conn.lookupByID(domain_id)
+                referenced_networks.update(self._domain_networks(dom))
+            for name in self.conn.listDefinedDomains():
+                dom = self.conn.lookupByName(name)
+                referenced_networks.update(self._domain_networks(dom))
+        except libvirt.libvirtError:
+            pass
+
+        network_names = set()
+        try:
+            network_names.update(self.conn.listNetworks())
+            network_names.update(self.conn.listDefinedNetworks())
+        except libvirt.libvirtError:
+            return []
+
+        removed = []
+        for name in sorted(network_names):
+            if not name.startswith(prefix):
+                continue
+            if name in referenced_networks:
+                continue
+            try:
+                net = self.conn.networkLookupByName(name)
+                if net.isActive() == 1:
+                    net.destroy()
+                net.undefine()
+                removed.append(name)
+            except libvirt.libvirtError:
+                continue
+        return removed
+
+    def _domain_networks(self, dom) -> List[str]:
+        try:
+            xml_desc = dom.XMLDesc(0)
+            root = ET.fromstring(xml_desc)
+        except Exception:
+            return []
+
+        names = []
+        for iface in root.findall("./devices/interface"):
+            source = iface.find("source")
+            if source is None:
+                continue
+            network_name = source.get("network")
+            if network_name:
+                names.append(network_name)
+        return names
 
     def _send_keycodes(self, dom: "libvirt.virDomain", keycodes: List[int], holdtime_ms: int = 30) -> bool:
         try:

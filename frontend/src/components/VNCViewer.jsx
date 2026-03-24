@@ -1,13 +1,16 @@
 import React, { useEffect, useRef, useState } from 'react';
 import RFB from '@novnc/novnc/core/rfb';
-import { Maximize, Minimize } from 'lucide-react';
+import { Maximize, Minimize, Clipboard, ClipboardCheck } from 'lucide-react';
 
-const VNCViewer = ({ url, password, viewOnly = false }) => {
+const VNCViewer = ({ url, password, viewOnly = false, credentials }) => {
     const containerRef = useRef(null);
     const screenRef = useRef(null);
     const rfbRef = useRef(null);
     const [status, setStatus] = useState('disconnected');
     const [isFullscreen, setIsFullscreen] = useState(false);
+    const [clipboardText, setClipboardText] = useState('');
+    const [showClipboard, setShowClipboard] = useState(false);
+    const [pasteFlash, setPasteFlash] = useState(false);
 
     const toggleFullscreen = () => {
         if (!document.fullscreenElement) {
@@ -16,6 +19,28 @@ const VNCViewer = ({ url, password, viewOnly = false }) => {
             });
         } else {
             document.exitFullscreen();
+        }
+    };
+
+    const handlePasteToVM = () => {
+        if (rfbRef.current && clipboardText) {
+            rfbRef.current.clipboardPasteFrom(clipboardText);
+            setPasteFlash(true);
+            setTimeout(() => setPasteFlash(false), 1000);
+        }
+    };
+
+    const handlePasteFromBrowser = async () => {
+        try {
+            const text = await navigator.clipboard.readText();
+            if (text && rfbRef.current) {
+                setClipboardText(text);
+                rfbRef.current.clipboardPasteFrom(text);
+                setPasteFlash(true);
+                setTimeout(() => setPasteFlash(false), 1000);
+            }
+        } catch {
+            setShowClipboard(true);
         }
     };
 
@@ -30,7 +55,6 @@ const VNCViewer = ({ url, password, viewOnly = false }) => {
     useEffect(() => {
         if (!url || !screenRef.current) return;
 
-        // Cleanup previous connection
         if (rfbRef.current) {
             rfbRef.current.disconnect();
         }
@@ -38,14 +62,13 @@ const VNCViewer = ({ url, password, viewOnly = false }) => {
         const connect = () => {
             try {
                 setStatus('connecting');
-                // RFB(target, url, options)
                 const rfb = new RFB(screenRef.current, url, {
                     credentials: { password: password }
                 });
 
                 rfb.viewOnly = viewOnly;
                 rfb.scaleViewport = true;
-                rfb.resizeSession = true;
+                rfb.resizeSession = false;
 
                 rfb.addEventListener("connect", () => {
                     setStatus('connected');
@@ -68,7 +91,6 @@ const VNCViewer = ({ url, password, viewOnly = false }) => {
             }
         };
 
-        // Small delay to ensure DOM is ready
         const timer = setTimeout(connect, 100);
 
         return () => {
@@ -82,19 +104,77 @@ const VNCViewer = ({ url, password, viewOnly = false }) => {
     return (
         <div 
             ref={containerRef}
-            className={`w-full bg-black relative rounded overflow-hidden border border-border group ${isFullscreen ? 'h-screen flex items-center justify-center' : 'h-[600px]'}`}
+            className={`w-full bg-black relative rounded overflow-hidden border border-border group ${isFullscreen ? 'h-screen flex flex-col' : 'h-[600px] flex flex-col'}`}
         >
-            <div className="absolute top-2 right-2 z-20 opacity-0 group-hover:opacity-100 transition-opacity">
-                <button 
-                    onClick={toggleFullscreen} 
-                    className="bg-gray-800/80 text-white p-2 rounded hover:bg-gray-700/80 backdrop-blur-sm"
-                    title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
-                >
-                    {isFullscreen ? <Minimize size={20}/> : <Maximize size={20}/>}
-                </button>
-            </div>
+            {/* Top toolbar — always visible when connected */}
+            {status === 'connected' && (
+                <div className="flex items-center justify-between bg-gray-900/95 px-3 py-1.5 text-xs z-20 shrink-0 border-b border-gray-700">
+                    <div className="flex items-center gap-3">
+                        <span className="flex items-center gap-1.5 text-green-400">
+                            <span className="w-2 h-2 rounded-full bg-green-400 inline-block"></span>
+                            Connected
+                        </span>
+                        {credentials?.username && credentials?.password && (
+                            <span className="text-blue-300 flex items-center gap-3 ml-2 border-l border-gray-600 pl-3">
+                                <span>User: <code className="bg-gray-800 px-1.5 py-0.5 rounded font-mono text-white">{credentials.username}</code></span>
+                                <span>Pass: <code className="bg-gray-800 px-1.5 py-0.5 rounded font-mono text-white">{credentials.password}</code></span>
+                            </span>
+                        )}
+                    </div>
+                    <div className="flex items-center gap-1">
+                        <button
+                            onClick={handlePasteFromBrowser}
+                            className={`p-1.5 rounded hover:bg-gray-700/80 transition-colors ${
+                                pasteFlash ? 'text-green-400' : 'text-gray-300'
+                            }`}
+                            title="Paste from clipboard into VM"
+                        >
+                            {pasteFlash ? <ClipboardCheck size={16} /> : <Clipboard size={16} />}
+                        </button>
+                        <button
+                            onClick={() => setShowClipboard(!showClipboard)}
+                            className={`px-2 py-1 rounded text-xs transition-colors ${
+                                showClipboard ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-700/80'
+                            }`}
+                            title="Open clipboard panel"
+                        >
+                            Clipboard
+                        </button>
+                        <button 
+                            onClick={toggleFullscreen} 
+                            className="p-1.5 rounded text-gray-300 hover:bg-gray-700/80 transition-colors"
+                            title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
+                        >
+                            {isFullscreen ? <Minimize size={16}/> : <Maximize size={16}/>}
+                        </button>
+                    </div>
+                </div>
+            )}
 
-            <div ref={screenRef} className="w-full h-full" />
+            {/* Clipboard panel */}
+            {showClipboard && status === 'connected' && (
+                <div className="bg-gray-900/95 px-3 py-2 border-b border-gray-700 z-20 shrink-0">
+                    <div className="flex gap-2 items-end">
+                        <textarea
+                            value={clipboardText}
+                            onChange={(e) => setClipboardText(e.target.value)}
+                            placeholder="Type or paste text here, then click Send to send it to the VM..."
+                            className="flex-1 bg-gray-800 border border-gray-600 rounded p-2 text-sm text-white placeholder-gray-500 resize-none focus:border-blue-500 outline-none"
+                            rows={2}
+                        />
+                        <button
+                            onClick={handlePasteToVM}
+                            disabled={!clipboardText}
+                            className="bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed text-white px-3 py-2 rounded text-sm whitespace-nowrap"
+                        >
+                            Send to VM
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            <div ref={screenRef} className="flex-1 min-h-0" />
+
             {status !== 'connected' && (
                 <div className="absolute inset-0 flex items-center justify-center bg-background/80 text-primary z-10">
                     <div className="text-center">

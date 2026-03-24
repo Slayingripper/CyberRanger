@@ -30,7 +30,7 @@ class TrainingRun(BaseModel):
     definition_id: str
     participants: List[str] = []
     current_level: int = 0
-    state: str = "running"  # 'running'|'completed'
+    state: str = "running"  # 'running'|'completed'|'stopped'
     level_states: List[LevelState] = []
     created_at: float = Field(default_factory=lambda: time.time())
 
@@ -194,3 +194,24 @@ async def take_hint(run_id: str, level_idx: int, hint_idx: int = 0):
     ls.score = max(0, ls.score - 10)
     save_run(run)
     return {"status": "hint_taken", "hints": ls.hints, "score": ls.score}
+
+
+@router.post("/training-runs/{run_id}/stop")
+async def stop_run(run_id: str):
+    run = load_run(run_id)
+    if run.state != "stopped":
+        run.state = "stopped"
+        if 0 <= run.current_level < len(run.level_states):
+            ls = run.level_states[run.current_level]
+            if ls.status == "in_progress":
+                ls.status = "pending"
+            if ls.ended_at is None:
+                ls.ended_at = time.time()
+        save_run(run)
+
+    try:
+        await event_bus.publish(run.id, {"type": "stopped", "ts": time.time(), "payload": {"run_id": run_id}})
+    except Exception:
+        pass
+
+    return {"status": "stopped", "run": run}

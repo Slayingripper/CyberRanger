@@ -90,6 +90,37 @@ function Training() {
       }
   };
 
+  const stopTraining = async () => {
+      try {
+          if (activeTraining?.levels?.[currentLevelIndex]?.topology) {
+              await axios.post(`${API_URL}/trainings/${activeTraining.id}/levels/${currentLevelIndex}/destroy`);
+          }
+      } catch (e) {
+          console.error('Failed to destroy environment while stopping training', e);
+      }
+
+      try {
+          if (runId) {
+              await axios.post(`${API_URL}/training-runs/${runId}/stop`);
+          }
+      } catch (e) {
+          console.error('Failed to stop training run', e);
+      }
+
+      try { wsRef.current?.close(); } catch (e) {}
+      clearTimeout(wsReconnectTimer.current);
+      wsRef.current = null;
+      setRunId(null);
+      setRunEvents([]);
+      setVmStatus(null);
+      setAnswers({});
+      setCompletedTasks(new Set());
+      setPendingNextLevel(null);
+      setDestroyConfirm(false);
+      setConsolePrompt({ isOpen: false, value: 'Hello from UI' });
+      setActiveTraining(null);
+  };
+
     const startTraining = (training) => {
         setActiveTraining(training);
         setCurrentLevelIndex(0);
@@ -270,9 +301,10 @@ function Training() {
   const executeSendConsole = async () => {
       if (!consolePrompt.value) return;
       try {
-          await axios.post(`${API_URL}/debug/trainings/${activeTraining.id}/levels/${currentLevelIndex}/console`, { msg: consolePrompt.value });
+          const res = await axios.post(`${API_URL}/debug/trainings/${activeTraining.id}/levels/${currentLevelIndex}/console`, { msg: consolePrompt.value });
           setConsolePrompt({ ...consolePrompt, isOpen: false });
-          setMessageModal({ isOpen: true, title: 'Success', message: 'Test console message sent', type: 'success' });
+          const sent = Array.isArray(res.data?.sent_to) ? res.data.sent_to.length : 0;
+          setMessageModal({ isOpen: true, title: 'Success', message: `Console text sent to ${sent} VM${sent === 1 ? '' : 's'}.`, type: 'success' });
       } catch (e) {
           setMessageModal({ isOpen: true, title: 'Error', message: 'Failed to send test message: ' + (e.response?.data?.detail || e.message), type: 'error' });
       }
@@ -304,8 +336,8 @@ function Training() {
                 <div className="text-sm text-muted italic">No levels yet.</div>
             )}
           </div>
-          <button onClick={() => setActiveTraining(null)} className="mt-4 text-sm text-secondary hover:text-white border-t border-border pt-4">
-            &larr; Back to Trainings
+                    <button onClick={stopTraining} className="mt-4 text-sm text-red-300 hover:text-white border-t border-border pt-4 text-left">
+                        &larr; Stop Training
           </button>
         </div>
 
@@ -380,6 +412,7 @@ function Training() {
                                                 <VNCViewer 
                                                     url={`${API_URL.replace(/^http/, 'ws')}/ws/vnc/${vm.vnc_port}`}
                                                     viewOnly={false}
+                                                    credentials={vm.credentials}
                                                 />
                                             </div>
                                         )}
