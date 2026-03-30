@@ -138,3 +138,7 @@ Comprehensive documentation is available in the [Wiki](docs/wiki/):
 - [ ] Allow custom network configurations (e.g. multiple interfaces, VLANs).
 - [ ] Add llm-based scenario generation and hints via OLLAMA integration.
 - [ ] Dynamic URL linking for ISO assets in scenario definitions.
+- [ ] Feedback on training - wrong answers.
+
+## Bugs
+- [ ] Only accepts the first answer of each section in a training scenario. Any other answers show error 400 and are not accepted, even if they are correct. -> **Fixed**
