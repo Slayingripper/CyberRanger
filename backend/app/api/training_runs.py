@@ -284,7 +284,10 @@ async def submit_level(run_id: str, level_idx: int, payload: SubmitPayload):
     ls = run.level_states[level_idx]
 
     if payload.task_id in ls.completed_tasks:
-        raise HTTPException(status_code=400, detail="Task already completed")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Task already completed (task_id={payload.task_id}, level_idx={level_idx})",
+        )
 
     ls.attempts += 1
     record_event(
