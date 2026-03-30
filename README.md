@@ -141,4 +141,4 @@ Comprehensive documentation is available in the [Wiki](docs/wiki/):
 - [ ] Feedback on training - wrong answers.
 
 ## Bugs
-- [ ] Only accepts the first answer of each section in a training scenario. Any other answers show error 400 and are not accepted, even if they are correct. -> **Fixed**
+- [ ] Only accepts the first answer of each section in a training scenario. Any other answers show error 400 and are not accepted, even if they are correct.
