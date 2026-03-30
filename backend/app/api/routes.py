@@ -5,6 +5,7 @@ from app.core.vm_manager import vm_manager, WORK_DIR
 import os
 import glob
 import json
+import logging
 from app.core.image_manager import ensure_image
 import asyncio
 import time
@@ -17,6 +18,7 @@ from app.core.deploy_jobs import new_job, get_job, update_job, update_progress, 
 import xml.etree.ElementTree as ET
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 TOPOLOGY_CACHE_FILE = os.path.join(WORK_DIR, "topology_cache.json")
 DEPLOYMENTS_FILE = os.path.join(WORK_DIR, "deployments.json")
@@ -27,7 +29,11 @@ def _load_topology_cache():
         try:
             with open(TOPOLOGY_CACHE_FILE, "r") as f:
                 return json.load(f)
-        except Exception:
+        except json.JSONDecodeError as e:
+            logger.warning("Topology cache contains invalid JSON: %s", e)
+            return None
+        except OSError as e:
+            logger.warning("Failed to read topology cache: %s", e)
             return None
     return None
 
@@ -48,7 +54,11 @@ def _load_deployments():
         try:
             with open(DEPLOYMENTS_FILE, "r") as f:
                 return json.load(f)
-        except Exception:
+        except json.JSONDecodeError as e:
+            logger.warning("Deployments file contains invalid JSON: %s", e)
+            return {}
+        except OSError as e:
+            logger.warning("Failed to read deployments file: %s", e)
             return {}
     return {}
 
@@ -73,16 +83,13 @@ async def get_deployments():
     deployments = _load_deployments()
     try:
         vm_manager.cleanup_unused_networks()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to cleanup unused networks: %s", e)
     
-    # Auto-cleanup: remove deployments that have no VMs present in the system
-    # We do not want to remove just stopped VMs, but VMs that are completely deleted.
-    # vm_manager.list_domains() returns all active and inactive (defined) domains.
     try:
         current_vms = {vm['name'] for vm in vm_manager.list_domains()}
-    except Exception:
-        # If we can't list domains, return as-is to avoid data loss
+    except Exception as e:
+        logger.error("Failed to list domains: %s", e)
         return deployments
 
     ids_to_remove = []
@@ -115,7 +122,8 @@ async def cleanup_networks():
         removed = vm_manager.cleanup_unused_networks()
         return {"status": "cleaned", "removed": removed, "count": len(removed)}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Failed to cleanup networks")
+        raise HTTPException(status_code=500, detail="Failed to cleanup networks")
 
 # In-memory cache for last topology (best-effort; resets on restart)
 _TOPOLOGY_CACHE: Dict[str, Any] = {}
@@ -255,9 +263,9 @@ def _is_opnsense_node(node: Any) -> bool:
     try:
         img = (node.config.image or "").lower()
         lbl = (node.label or "").lower()
-    except Exception:
+        return ("opnsense" in img) or ("opnsense" in lbl)
+    except AttributeError:
         return False
-    return ("opnsense" in img) or ("opnsense" in lbl)
 
 
 def _reuse_existing_network(net_name: str) -> bool:
@@ -276,8 +284,11 @@ def _reuse_existing_network(net_name: str) -> bool:
                 net.create()
             net.setAutostart(True)
             return True
-    except Exception:
-        pass
+    except Exception as e:
+        if "not found" in str(e).lower() or "does not exist" in str(e).lower():
+            logger.debug("Network %s not found: %s", net_name, e)
+        else:
+            logger.warning("Error checking existing network %s: %s", net_name, e)
     return False
 
 
@@ -289,7 +300,7 @@ def _active_nat_third_octets() -> set[int]:
         conn = vm_manager.conn
         if conn is None:
             return thirds
-        for net_name in conn.listNetworks() or []:  # active networks only
+        for net_name in conn.listNetworks() or []:
             try:
                 net = conn.networkLookupByName(net_name)
                 xml = net.XMLDesc(0)
@@ -301,10 +312,12 @@ def _active_nat_third_octets() -> set[int]:
                 parts = addr.split(".")
                 if len(parts) == 4 and parts[0] == "192" and parts[1] == "168":
                     thirds.add(int(parts[2]))
-            except Exception:
-                continue
-    except Exception:
-        pass
+            except ET.ParseError as e:
+                logger.warning("Failed to parse network XML for %s: %s", net_name, e)
+            except Exception as e:
+                logger.debug("Skipping network %s: %s", net_name, e)
+    except Exception as e:
+        logger.warning("Failed to list active NAT networks: %s", e)
     return thirds
 
 
@@ -361,7 +374,8 @@ async def get_vms():
             vm["credentials"] = creds_cache.get(vm.get("name"))
         return vms
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Failed to list VMs")
+        raise HTTPException(status_code=500, detail="Failed to list VMs")
 
 
 @router.get("/runtime/vms", response_model=List[VMRuntimeInfo])
@@ -370,7 +384,8 @@ async def get_runtime_vms():
         vms = vm_manager.list_domains_with_interfaces()
         return vms
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Failed to list runtime VMs")
+        raise HTTPException(status_code=500, detail="Failed to list runtime VMs")
 
 @router.post("/vms")
 async def create_vm(vm: VMCreateRequest):
@@ -422,8 +437,8 @@ async def delete_vm(name: str):
                 json.dump(creds_cache, f)
         try:
             vm_manager.cleanup_unused_networks()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to cleanup networks after VM deletion: %s", e)
         return {"status": "deleted"}
     raise HTTPException(status_code=404, detail="VM not found or could not be deleted")
 
@@ -514,9 +529,13 @@ async def deploy_topology(topology: TopologyDeployRequest):
     results = []
     creds_cache = _load_creds_cache()
     
-    # Log scenario deployment
     if topology.scenario:
-        print(f"Deploying Scenario: {topology.scenario.name} ({topology.scenario.difficulty}) for {topology.scenario.team} team.")
+        logger.info(
+            "Deploying Scenario: %s (%s) for %s team",
+            topology.scenario.name,
+            topology.scenario.difficulty,
+            topology.scenario.team
+        )
     
     # Create/ensure networks so edge-connected components can talk.
     # If a component contains an OPNsense node, we create an isolated LAN network (no DHCP/NAT)
@@ -927,7 +946,7 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest):
             }
             _save_deployments(deployments)
         except Exception as e:
-            print(f"Failed to save deployment record: {e}")
+            logger.error("Failed to save deployment record: %s", e)
 
         await update_job(
             job_id,

@@ -22,9 +22,7 @@ export function ThemeProvider({ children }) {
   }, [theme]);
 
   const changeTheme = (newTheme) => {
-    console.log('Theme change requested:', newTheme);
     setTheme(newTheme);
-    // Update localStorage
     const savedSettings = localStorage.getItem('appSettings');
     let settings = {};
     if (savedSettings) {

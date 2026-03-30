@@ -22,11 +22,42 @@ const VNCViewer = ({ url, password, viewOnly = false, credentials }) => {
         }
     };
 
+    const sendTextToVM = (text) => {
+        if (!rfbRef.current || !text) return;
+        
+        if (rfbRef.current.capabilities?.clipboard) {
+            try {
+                rfbRef.current.clipboardPasteFrom(text);
+                return true;
+            } catch (e) {
+                console.warn('clipboardPasteFrom failed, trying key fallback:', e);
+            }
+        }
+        
+        const charCodes = [];
+        for (let i = 0; i < text.length; i++) {
+            charCodes.push(text.charCodeAt(i));
+        }
+        
+        if (charCodes.length > 0) {
+            rfbRef.current.focus();
+            const sendKeyDownUp = (code) => {
+                rfbRef.current.sendKey(code, null, true);
+                rfbRef.current.sendKey(code, null, false);
+            };
+            charCodes.forEach((code) => sendKeyDownUp(code));
+            return true;
+        }
+        return false;
+    };
+
     const handlePasteToVM = () => {
-        if (rfbRef.current && clipboardText) {
-            rfbRef.current.clipboardPasteFrom(clipboardText);
-            setPasteFlash(true);
-            setTimeout(() => setPasteFlash(false), 1000);
+        if (clipboardText) {
+            const success = sendTextToVM(clipboardText);
+            if (success) {
+                setPasteFlash(true);
+                setTimeout(() => setPasteFlash(false), 1000);
+            }
         }
     };
 
@@ -35,7 +66,7 @@ const VNCViewer = ({ url, password, viewOnly = false, credentials }) => {
             const text = await navigator.clipboard.readText();
             if (text && rfbRef.current) {
                 setClipboardText(text);
-                rfbRef.current.clipboardPasteFrom(text);
+                sendTextToVM(text);
                 setPasteFlash(true);
                 setTimeout(() => setPasteFlash(false), 1000);
             }
@@ -63,6 +94,7 @@ const VNCViewer = ({ url, password, viewOnly = false, credentials }) => {
             try {
                 setStatus('connecting');
                 const rfb = new RFB(screenRef.current, url, {
+                    shared: true,
                     credentials: { password: password }
                 });
 
@@ -74,14 +106,21 @@ const VNCViewer = ({ url, password, viewOnly = false, credentials }) => {
                     setStatus('connected');
                 });
 
-                rfb.addEventListener("disconnect", (e) => {
+                rfb.addEventListener("disconnect", () => {
                     setStatus('disconnected');
-                    console.log("VNC Disconnected", e);
                 });
 
                 rfb.addEventListener("securityfailure", (e) => {
                     setStatus('error');
                     console.error("VNC Security Failure", e);
+                });
+
+                rfb.addEventListener("clipboard", (e) => {
+                    const text = e.detail.text;
+                    if (text) {
+                        setClipboardText(text);
+                        setShowClipboard(true);
+                    }
                 });
 
                 rfbRef.current = rfb;

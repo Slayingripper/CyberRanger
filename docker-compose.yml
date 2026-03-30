@@ -5,6 +5,10 @@ services:
     build: ./backend
     container_name: cyberrange-backend
     network_mode: host
+    # PRODUCTION SECURITY:
+    # - Set CORS_ORIGINS env var to your frontend domain
+    # - Consider: read-only volumes, explicit port mappings, read-only libvirt socket
+    # - Remove host network mode, add authentication before internet exposure
     volumes:
       - /var/run/libvirt/libvirt-sock:/var/run/libvirt/libvirt-sock
       - ./backend:/app

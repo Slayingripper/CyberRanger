@@ -1,0 +1,108 @@
+{
+  "id": "iot-fundamentals",
+  "title": "IoT Fundamentals - MQTT & Sensor Networks",
+  "description": "Learn the fundamentals of IoT by deploying an MQTT-based sensor network. Configure the broker, connect sensors, and build a real-time dashboard.",
+  "difficulty": "easy",
+  "levels": [
+    {
+      "id": "iot-level-1",
+      "title": "Deploy IoT Infrastructure",
+      "description": "Deploy the basic IoT infrastructure including the MQTT broker and gateway. All VMs are pre-configured with cloud-init.\n\n## Learning Objectives\n- Understand MQTT broker setup\n- Learn about IoT gateway configuration\n- Explore sensor data collection\n\n## Your Tasks\n1. Wait for all VMs to fully boot (check Dashboard)\n2. Note the IP addresses assigned to each VM\n3. Access the IoT Dashboard at http://[dashboard-ip]:5000\n\n## Key Concepts\n**MQTT (Message Queuing Telemetry Transport)** is a lightweight publish/subscribe messaging protocol designed for constrained devices and low-bandwidth networks.\n\n**Broker**: The central server that routes messages between publishers (sensors) and subscribers (dashboard).\n\n## Verification\nAccess the dashboard and confirm you can see sensor readings.",
+      "topology": {
+        "vms": []
+      },
+      "tasks": [
+        {
+          "id": "task-1-1",
+          "question": "What is the IP address of the IoT Gateway?",
+          "type": "action",
+          "answer": "192.168.1.10",
+          "hints": [
+            "Check the VM list in the Dashboard",
+            "The IoT Gateway VM should have an assigned IP"
+          ]
+        },
+        {
+          "id": "task-1-2",
+          "question": "Navigate to the IoT Dashboard and confirm sensor data is flowing. What is the current temperature reading?",
+          "type": "action",
+          "answer": "any",
+          "hints": [
+            "The dashboard runs on port 5000",
+            "Access it via http://[gateway-ip]:5000"
+          ]
+        },
+        {
+          "id": "task-1-3",
+          "question": "Subscribe to the MQTT topic 'iot/sensors/#' on the gateway. What topics are publishing data?",
+          "type": "action",
+          "answer": "iot/sensors/temperature",
+          "hints": [
+            "Use mosquitto_sub -h localhost -t 'iot/sensors/#'",
+            "Press Ctrl+C to exit"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "iot-level-2",
+      "title": "Secure MQTT Communications",
+      "description": "Now that the basic infrastructure is working, learn how to secure MQTT communications with authentication and TLS.\n\n## Learning Objectives\n- Configure MQTT username/password authentication\n- Enable TLS/SSL for encrypted communications\n- Understand IoT security best practices\n\n## Your Tasks\n1. Edit the Mosquitto configuration to require authentication:\n   ```bash\n   sudo nano /etc/mosquitto/mosquitto.conf\n   ```\n2. Add these lines:\n   ```\n   allow_anonymous false\n   password_file /etc/mosquitto/passwd\n   ```\n3. Create a password file:\n   ```bash\n   sudo mosquitto_passwd -c /etc/mosquitto/passwd iot_admin\n   ```\n4. Restart Mosquitto:\n   ```bash\n   sudo systemctl restart mosquitto\n   ```\n5. Update sensor scripts to use authentication:\n   ```bash\n   # Update MQTT client connection\n   client.username_pw_set(\"iot_admin\", \"your_password\")\n   ```\n\n## Security Notes\nIn production IoT deployments:\n- Always use TLS (port 8883)\n- Use certificate-based authentication\n- Implement ACLs for topic access control\n- Regularly rotate credentials",
+      "topology": {
+        "vms": []
+      },
+      "tasks": [
+        {
+          "id": "task-2-1",
+          "question": "Enable MQTT authentication and attempt to connect a sensor without credentials. What happens?",
+          "type": "action",
+          "answer": "connection refused",
+          "hints": [
+            "Try running a sensor script without authentication",
+            "Check mosquitto logs: sudo tail -f /var/log/mosquitto/mosquitto.log"
+          ]
+        },
+        {
+          "id": "task-2-2",
+          "question": "After configuring authentication, reconnect a sensor with proper credentials. Confirm data flow resumes.",
+          "type": "action",
+          "answer": "connected",
+          "hints": [
+            "Update the MQTT client code with username/password",
+            "Restart the sensor simulation script"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "iot-level-3",
+      "title": "Build Custom Dashboard",
+      "description": "Extend the IoT dashboard with custom visualizations and alerts.\n\n## Learning Objectives\n- Modify Flask web applications\n- Add real-time alerts\n- Create custom sensor visualizations\n\n## Your Tasks\n1. SSH into the Dashboard VM\n2. Edit the dashboard code:\n   ```bash\n   sudo nano /opt/dashboard.py\n   ```\n3. Add an alert threshold for high temperature:\n   ```python\n   if data.get('temperature', {}).get('value', 0) > 35:\n       alerts.append('HIGH TEMPERATURE WARNING!')\n   ```\n4. Add a new visualization for humidity (add a humidity sensor if not present)\n5. Restart the dashboard service\n\n## Challenge\nAdd a feature to send email/SMS alerts when sensors detect anomalies.",
+      "topology": {
+        "vms": []
+      },
+      "tasks": [
+        {
+          "id": "task-3-1",
+          "question": "Add a temperature threshold alert to the dashboard. What alert message appears when temperature exceeds 35C?",
+          "type": "action",
+          "answer": "high temperature",
+          "hints": [
+            "Edit the dashboard.py file",
+            "Add a conditional check for temperature value"
+          ]
+        },
+        {
+          "id": "task-3-2",
+          "question": "Create a visualization showing the last 10 temperature readings as a chart.",
+          "type": "action",
+          "answer": "chart",
+          "hints": [
+            "Use HTML canvas or a library like Chart.js",
+            "Store last 10 readings in a list"
+          ]
+        }
+      ]
+    }
+  ]
+}

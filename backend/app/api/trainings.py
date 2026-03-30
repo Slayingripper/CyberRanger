@@ -5,6 +5,7 @@ import json
 import yaml
 import os
 import uuid
+import logging
 from app.core.vm_manager import WORK_DIR, vm_manager
 from app.core.image_manager import ensure_image
 from app.core.event_bus import event_bus
@@ -12,6 +13,7 @@ from app.core.provisioning import build_cloud_init_assets, build_cloud_init_from
 import time
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 TRAININGS_DIR = os.path.join(WORK_DIR, "trainings")
 os.makedirs(TRAININGS_DIR, exist_ok=True)
@@ -36,7 +38,11 @@ def _save_creds_cache(cache: Dict[str, Dict[str, str]]) -> None:
 
 IMAGE_ALIASES = {
     "ubuntu-20.04": "focal-server-cloudimg-amd64.img",
+    "ubuntu-22.04": "jammy-server-cloudimg-amd64.img",
     "kali-linux": "kali-linux-2025.4-qemu-amd64.qcow2",
+    "debian-12": "debian-12-generic-amd64.qcow2",
+    "alpine-edge": "alpine-edge.qcow2",
+    "opnsense": "OPNsense.qcow2",
 }
 
 IMAGE_DOWNLOAD_SOURCES = {
@@ -44,12 +50,28 @@ IMAGE_DOWNLOAD_SOURCES = {
         "url": "https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-amd64.img",
         "filename": "focal-server-cloudimg-amd64.img",
     },
+    "jammy-server-cloudimg-amd64.img": {
+        "url": "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img",
+        "filename": "jammy-server-cloudimg-amd64.img",
+    },
     "kali-linux-2025.4-qemu-amd64.qcow2": {
         "url": "https://cdimage.kali.org/kali-2025.1/kali-linux-2025.1-qemu-amd64.7z",
         "filename": "kali-linux-2025.1-qemu-amd64.7z",
         "extract": {
             "type": "7z",
             "output_filename": "kali-linux-2025.4-qemu-amd64.qcow2",
+        },
+    },
+    "debian-12-generic-amd64.qcow2": {
+        "url": "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2",
+        "filename": "debian-12-generic-amd64.qcow2",
+    },
+    "OPNsense-qcow2.vga-amd64-24.1.qcow": {
+        "url": "https://mirror.us-phoenix-1.gnupgrade.net/opnsense/releases/24.1/OPNsense-24.1.1-OpenSSL-nano-amd64.img.bz2",
+        "filename": "OPNsense-24.1.1-OpenSSL-nano-amd64.img.bz2",
+        "extract": {
+            "type": "bz2",
+            "output_filename": "OPNsense.qcow2",
         },
     },
 }
@@ -73,10 +95,9 @@ async def _resolve_training_image_path(image_key: str) -> str:
     if os.path.exists(full_path):
         return full_path
 
-    # Try to auto-download the image
     source = IMAGE_DOWNLOAD_SOURCES.get(filename)
     if source:
-        print(f"[trainings] Image {filename} not found locally, downloading...")
+        logger.info("Image %s not found locally, downloading...", filename)
         result = await ensure_image(source)
         return result.container_path
 
@@ -84,25 +105,46 @@ async def _resolve_training_image_path(image_key: str) -> str:
 
 class Task(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    question: str
-    type: str  # 'quiz', 'action'
+    question: Optional[str] = None
+    title: Optional[str] = None
+    description: Optional[str] = None
+    type: Optional[str] = None
+    hint: Optional[str] = None
+    hints: Optional[List[str]] = Field(default_factory=list)
     answer: Optional[str] = None
     verification_script: Optional[str] = None
-    hints: Optional[List[str]] = []
+    order: Optional[int] = None
+
+    def get_text(self) -> str:
+        return self.question or self.title or self.description or ""
+
+    def get_hint(self) -> Optional[str]:
+        return self.hint or (self.hints[0] if self.hints else None)
+
+    def get_task_type(self) -> str:
+        return self.type or "action"
 
 class Level(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     title: str
     description: str
-    topology: Optional[Dict[str, Any]] = None # Full topology object or reference
-    tasks: List[Task]
+    topology: Optional[Dict[str, Any]] = None
+    tasks: List[Task] = Field(default_factory=list)
 
 class Training(BaseModel):
     id: Optional[str] = None
     title: str
     description: str
-    difficulty: str # 'easy', 'medium', 'hard'
-    levels: List[Level]
+    difficulty: Optional[str] = None
+    level: Optional[str] = None
+    duration: Optional[str] = None
+    prerequisites: Optional[List[str]] = Field(default_factory=list)
+    learningObjectives: Optional[List[str]] = Field(default_factory=list)
+    resources: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
+    levels: List[Level] = Field(default_factory=list)
+
+    def get_difficulty(self) -> str:
+        return self.difficulty or self.level or "medium"
 
 @router.get("/trainings", response_model=List[Training])
 async def list_trainings():
@@ -116,8 +158,10 @@ async def list_trainings():
                 with open(os.path.join(TRAININGS_DIR, f), "r") as file:
                     data = json.load(file)
                     trainings.append(data)
-            except Exception as e:
-                print(f"Error loading training {f}: {e}")
+            except json.JSONDecodeError as e:
+                logger.warning("Training file %s contains invalid JSON: %s", f, e)
+            except OSError as e:
+                logger.warning("Failed to read training file %s: %s", f, e)
     return trainings
 
 @router.get("/trainings/{training_id}", response_model=Training)
@@ -229,13 +273,13 @@ async def deploy_level(training_id: str, level_idx: int):
             if creds:
                 creds_cache[name] = creds
             results.append({"name": name, "status": "created", "details": res, "credentials": creds})
-            try:
-                # Start console streaming to EventBus for runs associated with this training/level
-                vm_manager.start_console_stream(name, training_id, level_idx)
-            except Exception:
-                pass
         except Exception as e:
             results.append({"name": name, "status": "error", "error": str(e)})
+
+        try:
+            vm_manager.start_console_stream(name, training_id, level_idx)
+        except Exception as e:
+            logger.warning("Failed to start console stream for %s: %s", name, e)
     _save_creds_cache(creds_cache)
     # publish event to any matching runs
     await event_bus.publish_by_definition_level(training_id, level_idx, {"type": "deploy", "ts": time.time(), "result": results})
@@ -287,15 +331,15 @@ async def destroy_level(training_id: str, level_idx: int):
                 creds_cache.pop(name, None)
                 try:
                     vm_manager.stop_console_stream(name)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except Exception as e:
+                    logger.debug("Failed to stop console stream for %s: %s", name, e)
+        except Exception as e:
+            logger.warning("Failed to destroy VM %s: %s", name, e)
     _save_creds_cache(creds_cache)
     try:
         vm_manager.cleanup_unused_networks()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to cleanup networks after level destroy: %s", e)
     await event_bus.publish_by_definition_level(training_id, level_idx, {"type": "destroy", "ts": time.time(), "result": results})
     return {"status": "destroyed", "vms": results}
 

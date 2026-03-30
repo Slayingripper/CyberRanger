@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Play, Square, Plus, Monitor, Settings as SettingsIcon, Network, HardDrive, BookOpen } from 'lucide-react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { Play, Square, Plus, Monitor, Settings as SettingsIcon, Network, HardDrive, BookOpen, Loader2 } from 'lucide-react';
 import axios from 'axios';
 import { getApiUrl } from './lib/api';
 import Images from './components/Images';
@@ -18,32 +18,16 @@ function AppContent() {
   const [visitedTabs, setVisitedTabs] = useState(new Set(['dashboard']));
   const [vms, setVms] = useState([]);
   const [deployments, setDeployments] = useState({});
-  const [loading, setLoading] = useState(false);
-
-  const switchTab = (tab) => {
-    setActiveTab(tab);
-    setVisitedTabs(prev => {
-      if (prev.has(tab)) return prev;
-      const next = new Set(prev);
-      next.add(tab);
-      return next;
-    });
-    // Let the DOM update (display:none → visible) then nudge ResizeObservers
-    // so components like ReactFlow re-measure their containers.
-    requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
-  };
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const fetchDataRef = useRef(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [activeConsole, setActiveConsole] = useState(null);
   const [topologyToView, setTopologyToView] = useState(null);
   const [deleteConfirm, setDeleteConfirm] = useState({ isOpen: false, vmName: null });
 
-  useEffect(() => {
-    fetchData();
-    const interval = setInterval(fetchData, 5000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const fetchData = async () => {
+  const fetchData = useCallback(async (isManualRefresh = false) => {
+    if (isManualRefresh) setRefreshing(true);
     try {
       const [vmsRes, depsRes] = await Promise.all([
           axios.get(`${API_URL}/vms`),
@@ -53,42 +37,66 @@ function AppContent() {
       setDeployments(depsRes.data);
     } catch (error) {
       console.error("Error fetching data:", error);
+    } finally {
+      setLoading(false);
+      if (isManualRefresh) setRefreshing(false);
     }
-  };
+  }, []);
 
-  const fetchVMs = fetchData; // Alias for compatibility with existing functions calling fetchVMs
+  fetchDataRef.current = fetchData;
 
-  const handleStartVM = async (name) => {
+  useEffect(() => {
+    fetchData();
+    const interval = setInterval(() => fetchDataRef.current(false), 5000);
+    return () => clearInterval(interval);
+  }, [fetchData]);
+
+  const handleStartVM = useCallback(async (name) => {
     await axios.post(`${API_URL}/vms/${name}/start`);
-    fetchVMs();
-  };
+    fetchDataRef.current(true);
+  }, []);
 
-  const handleStopVM = async (name) => {
+  const handleStopVM = useCallback(async (name) => {
     await axios.post(`${API_URL}/vms/${name}/stop`);
-    fetchVMs();
-  };
+    fetchDataRef.current(true);
+  }, []);
 
-  const handleDeleteVM = (name) => {
+  const handleDeleteVM = useCallback((name) => {
     setDeleteConfirm({ isOpen: true, vmName: name });
-  };
+  }, []);
 
-  const executeDeleteVM = async () => {
+  const executeDeleteVM = useCallback(async () => {
     if (!deleteConfirm.vmName) return;
     await axios.delete(`${API_URL}/vms/${deleteConfirm.vmName}`);
-    fetchVMs();
+    fetchDataRef.current(true);
     setDeleteConfirm({ isOpen: false, vmName: null });
-  };
+  }, [deleteConfirm.vmName]);
 
-  const handleCleanupNetworks = async () => {
+  const handleCleanupNetworks = useCallback(async () => {
     try {
       const res = await axios.post(`${API_URL}/networks/cleanup`);
-      await fetchData();
+      await fetchData(true);
       const count = Number(res.data?.count || 0);
       window.alert(count > 0 ? `Removed ${count} orphaned network${count === 1 ? '' : 's'}.` : 'No orphaned CyberRanger networks found.');
     } catch (error) {
       window.alert(`Failed to clean networks: ${error.response?.data?.detail || error.message}`);
     }
-  };
+  }, []);
+
+  const switchTab = useCallback((tab) => {
+    setActiveTab(tab);
+    setVisitedTabs(prev => {
+      if (prev.has(tab)) return prev;
+      const next = new Set(prev);
+      next.add(tab);
+      return next;
+    });
+    requestAnimationFrame(() => window.dispatchEvent(new Event('resize')));
+  }, []);
+
+  const handleRefresh = useCallback(() => {
+    fetchData(true);
+  }, [fetchData]);
 
   return (
     <div className="flex h-screen font-sans">
@@ -118,10 +126,12 @@ function AppContent() {
             <Dashboard 
               vms={vms} 
               deployments={deployments}
+              loading={loading}
+              refreshing={refreshing}
               onStart={handleStartVM} 
               onStop={handleStopVM} 
               onDelete={handleDeleteVM}
-              onRefresh={fetchData}
+              onRefresh={handleRefresh}
               onCleanupNetworks={handleCleanupNetworks}
               onCreate={() => setShowCreateModal(true)}
               onOpenConsole={(vm) => setActiveConsole({ host: 'localhost', port: vm.vnc_port, name: vm.name })}
@@ -148,7 +158,7 @@ function AppContent() {
       )}
 
       {showCreateModal && (
-        <CreateVMModal onClose={() => setShowCreateModal(false)} onCreated={() => { setShowCreateModal(false); fetchVMs(); }} />
+        <CreateVMModal onClose={() => setShowCreateModal(false)} onCreated={() => { setShowCreateModal(false); fetchDataRef.current(true); }} />
       )}
 
       {activeConsole && (
@@ -201,8 +211,77 @@ function SidebarItem({ icon, label, active, onClick }) {
   );
 }
 
-function Dashboard({ vms, deployments, onStart, onStop, onDelete, onRefresh, onCleanupNetworks, onCreate, onOpenConsole, onViewTopology }) {
-  const groupedVMs = React.useMemo(() => {
+const VMCard = React.memo(function VMCard({ vm, onStart, onStop, onDelete, onOpenConsole }) {
+  const handleStart = useCallback(() => onStart(vm.name), [onStart, vm.name]);
+  const handleStop = useCallback(() => onStop(vm.name), [onStop, vm.name]);
+  const handleDelete = useCallback(() => onDelete(vm.name), [onDelete, vm.name]);
+  const handleConsole = useCallback(() => onOpenConsole(vm), [onOpenConsole, vm]);
+
+  return (
+    <div className="bg-surface rounded-xl border border-border p-6 shadow-lg">
+      <div className="flex justify-between items-start mb-4">
+        <div>
+          <h3 className="text-lg font-bold text-primary">{vm.name}</h3>
+          <span className={`text-xs px-2 py-1 rounded-full ${
+            vm.state === 1 ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'
+          }`}>
+            {vm.state === 1 ? 'Running' : 'Stopped'}
+          </span>
+        </div>
+        <Monitor className="text-secondary" />
+      </div>
+      
+      <div className="space-y-2 text-sm text-secondary mb-6">
+        <div className="flex justify-between">
+          <span>Memory:</span>
+          <span>{Math.round(vm.memory / 1024)} MB</span>
+        </div>
+        <div className="flex justify-between">
+          <span>vCPUs:</span>
+          <span>{vm.vcpus}</span>
+        </div>
+        <div className="flex justify-between">
+          <span>VNC Port:</span>
+          <span>{vm.vnc_port || 'N/A'}</span>
+        </div>
+        {vm.credentials && vm.credentials.username && vm.credentials.password && (
+          <div className="border border-blue-800 bg-blue-950/20 rounded p-2">
+            <div className="text-xs text-blue-100 font-semibold">Credentials</div>
+            <div className="text-xs text-blue-200">User: <code className="bg-background px-1 rounded text-white">{vm.credentials.username}</code></div>
+            <div className="text-xs text-blue-200">Pass: <code className="bg-background px-1 rounded text-white">{vm.credentials.password}</code></div>
+          </div>
+        )}
+      </div>
+
+      <div className="flex space-x-2">
+        {vm.state !== 1 ? (
+          <button onClick={handleStart} className="flex-1 bg-green-600 hover:bg-green-700 text-primary py-2 rounded flex items-center justify-center space-x-2">
+            <Play size={16} /> <span>Start</span>
+          </button>
+        ) : (
+          <button onClick={handleStop} className="flex-1 bg-yellow-600 hover:bg-yellow-700 text-primary py-2 rounded flex items-center justify-center space-x-2">
+            <Square size={16} /> <span>Stop</span>
+          </button>
+        )}
+        <button onClick={handleDelete} className="px-3 bg-red-900/50 hover:bg-red-900 text-red-200 rounded">
+          Delete
+        </button>
+      </div>
+
+      {vm.state === 1 && vm.vnc_port && (
+        <button 
+          onClick={handleConsole}
+          className="mt-3 block w-full text-center bg-accent/30 hover:bg-accent/50 text-accent py-2 rounded border border-accent"
+        >
+          Open Console (NoVNC)
+        </button>
+      )}
+    </div>
+  );
+});
+
+function Dashboard({ vms, deployments, loading, refreshing, onStart, onStop, onDelete, onRefresh, onCleanupNetworks, onCreate, onOpenConsole, onViewTopology }) {
+  const groupedVMs = useMemo(() => {
     const groups = {};
     const deployedVMNames = new Set();
     const deps = deployments || {}; 
@@ -233,69 +312,6 @@ function Dashboard({ vms, deployments, onStart, onStop, onDelete, onRefresh, onC
     return { groups: sortedGroups, other };
   }, [vms, deployments]);
 
-  const VMCard = ({ vm }) => (
-      <div className="bg-surface rounded-xl border border-border p-6 shadow-lg">
-        <div className="flex justify-between items-start mb-4">
-          <div>
-            <h3 className="text-lg font-bold text-primary">{vm.name}</h3>
-            <span className={`text-xs px-2 py-1 rounded-full ${
-              vm.state === 1 ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'
-            }`}>
-              {vm.state === 1 ? 'Running' : 'Stopped'}
-            </span>
-          </div>
-          <Monitor className="text-secondary" />
-        </div>
-        
-        <div className="space-y-2 text-sm text-secondary mb-6">
-          <div className="flex justify-between">
-            <span>Memory:</span>
-            <span>{Math.round(vm.memory / 1024)} MB</span>
-          </div>
-          <div className="flex justify-between">
-            <span>vCPUs:</span>
-            <span>{vm.vcpus}</span>
-          </div>
-          <div className="flex justify-between">
-            <span>VNC Port:</span>
-            <span>{vm.vnc_port || 'N/A'}</span>
-          </div>
-          {vm.credentials && vm.credentials.username && vm.credentials.password && (
-            <div className="border border-blue-800 bg-blue-950/20 rounded p-2">
-              <div className="text-xs text-blue-100 font-semibold">Credentials</div>
-              <div className="text-xs text-blue-200">User: <code className="bg-background px-1 rounded text-white">{vm.credentials.username}</code></div>
-              <div className="text-xs text-blue-200">Pass: <code className="bg-background px-1 rounded text-white">{vm.credentials.password}</code></div>
-            </div>
-          )}
-
-          </div>
-
-        <div className="flex space-x-2">
-          {vm.state !== 1 ? (
-            <button onClick={() => onStart(vm.name)} className="flex-1 bg-green-600 hover:bg-green-700 text-primary py-2 rounded flex items-center justify-center space-x-2">
-              <Play size={16} /> <span>Start</span>
-            </button>
-          ) : (
-            <button onClick={() => onStop(vm.name)} className="flex-1 bg-yellow-600 hover:bg-yellow-700 text-primary py-2 rounded flex items-center justify-center space-x-2">
-              <Square size={16} /> <span>Stop</span>
-            </button>
-          )}
-          <button onClick={() => onDelete(vm.name)} className="px-3 bg-red-900/50 hover:bg-red-900 text-red-200 rounded">
-            Delete
-          </button>
-        </div>
-
-        {vm.state === 1 && vm.vnc_port && (
-           <button 
-             onClick={() => onOpenConsole(vm)}
-             className="mt-3 block w-full text-center bg-accent/30 hover:bg-accent/50 text-accent py-2 rounded border border-accent"
-           >
-             Open Console (NoVNC)
-           </button>
-        )}
-      </div>
-  );
-
   return (
     <div>
       <div className="flex justify-between items-center mb-6">
@@ -305,7 +321,9 @@ function Dashboard({ vms, deployments, onStart, onStop, onDelete, onRefresh, onC
                 <Plus size={16} /> Create New VM
              </div>
              <button onClick={onCleanupNetworks} className="bg-red-900/40 hover:bg-red-900/60 text-red-200 px-4 py-2 rounded text-sm">Cleanup Networks</button>
-             <button onClick={onRefresh} className="bg-surfaceHover hover:opacity-80 text-primary px-4 py-2 rounded text-sm">Refresh</button>
+             <button onClick={onRefresh} disabled={refreshing} className="bg-surfaceHover hover:opacity-80 text-primary px-4 py-2 rounded text-sm flex items-center gap-2 disabled:opacity-50">
+               <Loader2 size={14} className={refreshing ? 'animate-spin' : ''} /> {refreshing ? 'Refreshing...' : 'Refresh'}
+             </button>
         </div>
       </div>
       
@@ -328,7 +346,7 @@ function Dashboard({ vms, deployments, onStart, onStop, onDelete, onRefresh, onC
             {group.vmObjects.length > 0 ? (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                     {group.vmObjects.map(vm => (
-                        <VMCard key={vm.uuid} vm={vm} />
+                        <VMCard key={vm.uuid} vm={vm} onStart={onStart} onStop={onStop} onDelete={onDelete} onOpenConsole={onOpenConsole} />
                     ))}
                 </div>
             ) : (
@@ -338,20 +356,29 @@ function Dashboard({ vms, deployments, onStart, onStop, onDelete, onRefresh, onC
       ))}
 
       {groupedVMs.other.length > 0 && (
-         <div className="mb-8">
-             <h3 className="text-lg font-bold text-secondary uppercase tracking-wider mb-4 border-b border-border pb-2 mt-8">Uncategorized VMs</h3>
-             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {groupedVMs.other.map(vm => (
-                    <VMCard key={vm.uuid} vm={vm} />
-                ))}
-             </div>
-         </div>
+          <div className="mb-8">
+              <h3 className="text-lg font-bold text-secondary uppercase tracking-wider mb-4 border-b border-border pb-2 mt-8">Uncategorized VMs</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                 {groupedVMs.other.map(vm => (
+                     <VMCard key={vm.uuid} vm={vm} onStart={onStart} onStop={onStop} onDelete={onDelete} onOpenConsole={onOpenConsole} />
+                 ))}
+              </div>
+          </div>
       )}
       
       {(vms.length === 0) && (
           <div className="text-center py-20 bg-surface/20 rounded-xl border border-border border-dashed">
-              <div className="text-secondary text-lg">No virtual machines found.</div>
-              <div className="text-secondary/60 text-sm mt-2">Deploy a topology or create a VM manually to get started.</div>
+              {loading ? (
+                <div className="flex flex-col items-center gap-2">
+                  <Loader2 size={32} className="animate-spin text-accent" />
+                  <div className="text-secondary">Loading virtual machines...</div>
+                </div>
+              ) : (
+                <>
+                  <div className="text-secondary text-lg">No virtual machines found.</div>
+                  <div className="text-secondary/60 text-sm mt-2">Deploy a topology or create a VM manually to get started.</div>
+                </>
+              )}
           </div>
       )}
     </div>

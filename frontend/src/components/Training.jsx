@@ -150,7 +150,7 @@ function Training() {
             const wsUrl = `${wsBase}/api/ws/training-runs/${runId}`;
             const ws = new WebSocket(wsUrl);
             wsRef.current = ws;
-            ws.onopen = () => console.log('WS open for run', runId);
+            ws.onopen = () => {};
             ws.onmessage = (e) => {
                 try {
                     const data = JSON.parse(e.data);
@@ -160,7 +160,6 @@ function Training() {
                 }
             };
             ws.onclose = () => {
-                console.log('WS closed for run', runId);
                 if (!cancelled) {
                     wsReconnectTimer.current = setTimeout(connectWs, 3000);
                 }

@@ -1,0 +1,108 @@
+{
+  "id": "pv-solar-monitoring",
+  "title": "PV Solar Plant Monitoring & SCADA",
+  "description": "Deploy and configure a photovoltaic solar plant monitoring system. Learn about SCADA systems, data logging, and real-time energy monitoring.",
+  "difficulty": "medium",
+  "levels": [
+    {
+      "id": "solar-level-1",
+      "title": "Deploy Solar Monitoring Infrastructure",
+      "description": "Deploy the complete PV solar monitoring stack including SCADA, data logger, and analytics.\n\n## Learning Objectives\n- Understand SCADA (Supervisory Control and Data Acquisition)\n- Learn about solar panel monitoring metrics\n- Explore data collection and logging\n\n## Infrastructure Components\n1. **SCADA Server**: Collects real-time PV data, runs the main dashboard\n2. **Data Logger**: Stores historical data in InfluxDB\n3. **Alert System**: Monitors for anomalies and sends notifications\n4. **Analytics Server**: Generates reports and trends\n\n## Key Metrics Monitored\n- PV Voltage & Current\n- Power Output (Watts)\n- Panel Temperature\n- Solar Irradiation\n- Total Energy Generated\n- System Efficiency\n\n## Your Tasks\n1. Wait for all VMs to boot and note their IP addresses\n2. Access the SCADA dashboard at http://[scada-ip]:5000\n3. Verify all metrics are being collected\n4. Check the data logger is receiving data\n\n## Understanding Solar Metrics\n**PV Voltage/Current**: Raw electrical output from solar panels\n**Power**: Calculated as P = V × I\n**Efficiency**: Percentage of sunlight converted to electricity\n**Irradiation**: Solar radiation intensity in W/m²",
+      "topology": {
+        "vms": []
+      },
+      "tasks": [
+        {
+          "id": "task-1-1",
+          "question": "What is the current PV power output in Watts?",
+          "type": "action",
+          "answer": "any",
+          "hints": [
+            "Check the main SCADA dashboard",
+            "Look for the 'PV Power' metric"
+          ]
+        },
+        {
+          "id": "task-1-2",
+          "question": "What is the current panel temperature in Celsius?",
+          "type": "action",
+          "answer": "any",
+          "hints": [
+            "Find the Temperature metric on the dashboard",
+            "Normal range: 25-65°C depending on sunlight"
+          ]
+        },
+        {
+          "id": "task-1-3",
+          "question": "How much total energy has been generated in kWh?",
+          "type": "action",
+          "answer": "any",
+          "hints": [
+            "Look for 'Total Energy' or 'Energy' metric",
+            "Unit should be kWh (kilowatt-hours)"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "solar-level-2",
+      "title": "Configure Alert Thresholds",
+      "description": "Configure the alert system to notify when solar production falls below expected levels.\n\n## Learning Objectives\n- Understand alert/notification systems\n- Configure threshold-based alerts\n- Learn about industrial monitoring best practices\n\n## Alert System Configuration\nThe alert system runs on the Alert System VM and monitors:\n- Low power output\n- High temperature\n- Equipment failures\n- Communication losses\n\n## Your Tasks\n1. SSH into the Alert System VM\n2. Edit the alert configuration:\n   ```bash\n   sudo nano /opt/alert_monitor.py\n   ```\n3. Configure these thresholds:\n   - Power below 150W → Warning\n   - Power below 50W → Critical\n   - Temperature above 70°C → Warning\n   - Temperature above 80°C → Critical\n\n4. Test by observing the alert log:\n   ```bash\n   tail -f /var/log/alerts.log\n   ```\n\n## Industry Standards\nIn real solar plants, alerts are integrated with:\n- SCADA systems\n- Mobile apps (SMS/push notifications)\n- Email distribution lists\n- Central control rooms",
+      "topology": {
+        "vms": []
+      },
+      "tasks": [
+        {
+          "id": "task-2-1",
+          "question": "Configure a low-power alert at 150W. What message appears in the alert log when power drops below this threshold?",
+          "type": "action",
+          "answer": "low power",
+          "hints": [
+            "Edit /opt/alert_monitor.py",
+            "Look for the power threshold comparison"
+          ]
+        },
+        {
+          "id": "task-2-2",
+          "question": "Configure a high-temperature alert at 70°C. At what temperature did the first alert trigger?",
+          "type": "action",
+          "answer": "70",
+          "hints": [
+            "Add temperature checking logic",
+            "Monitor the alert log for temperature alerts"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "solar-level-3",
+      "title": "Build Custom Reports",
+      "description": "Create custom analytics and reporting for the solar plant.\n\n## Learning Objectives\n- Generate daily/weekly/monthly reports\n- Create data visualizations\n- Understand performance metrics\n\n## Report Generation\nThe Analytics Server generates reports including:\n- Daily energy production\n- Performance ratio (PR)\n- Capacity utilization factor (CUF)\n- Trend analysis\n\n## Your Tasks\n1. SSH into the Analytics Server\n2. Examine the report generation script:\n   ```bash\n   cat /opt/reports.py\n   ```\n3. Modify it to generate:\n   - Daily summary report\n   - Efficiency trend chart\n   - Comparison with previous days\n\n4. Access generated reports:\n   ```bash\n   ls -la /var/www/html/\n   ```\n\n## Key Performance Indicators\n**Performance Ratio (PR)**: Actual output / Theoretical output\n**Capacity Utilization Factor (CUF)**: Actual output / (Capacity × Hours)\n**Specific Yield**: kWh per kWp installed",
+      "topology": {
+        "vms": []
+      },
+      "tasks": [
+        {
+          "id": "task-3-1",
+          "question": "Generate a daily summary report. What was the average power output for the period?",
+          "type": "action",
+          "answer": "any",
+          "hints": [
+            "Run the report generation script",
+            "Check /var/www/html/ for the output"
+          ]
+        },
+        {
+          "id": "task-3-2",
+          "question": "Create a 7-day trend chart showing power output. What pattern do you observe?",
+          "type": "action",
+          "answer": "any",
+          "hints": [
+            "Aggregate data from multiple days",
+            "Use matplotlib to create the visualization"
+          ]
+        }
+      ]
+    }
+  ]
+}

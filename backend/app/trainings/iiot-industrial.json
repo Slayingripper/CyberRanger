@@ -1,0 +1,143 @@
+{
+  "id": "iiot-industrial",
+  "title": "IIoT Industrial Automation",
+  "description": "Learn to secure and operate Industrial Internet of Things environments with SCADA systems, PLCs, and MES integration.",
+  "level": "intermediate",
+  "duration": "3-4 hours",
+  "prerequisites": [
+    "Basic networking knowledge",
+    "Familiarity with industrial control systems concepts"
+  ],
+  "learningObjectives": [
+    "Understand SCADA/HMI architecture and operation",
+    "Configure and secure OPC-UA communication",
+    "Program and monitor PLC simulators",
+    "Integrate data historian with MES systems"
+  ],
+  "levels": [
+    {
+      "id": "scada-basics",
+      "title": "SCADA Fundamentals",
+      "description": "Learn the basics of SCADA systems and HMI operation",
+      "tasks": [
+        {
+          "id": "scada-1",
+          "order": 1,
+          "title": "Connect to SCADA/HMI Workstation",
+          "description": "Access the SCADA/HMI workstation via VNC to understand the control interface",
+          "hint": "Use the VNC console to connect to the SCADA workstation. Look for the main control panel application."
+        },
+        {
+          "id": "scada-2",
+          "order": 2,
+          "title": "Monitor System Status",
+          "description": "Check the current status of all connected devices on the SCADA dashboard",
+          "hint": "Navigate to the device status tab. You should see PLC, OPC-UA server, and data historian status indicators."
+        },
+        {
+          "id": "scada-3",
+          "order": 3,
+          "title": "Acknowledge System Alerts",
+          "description": "Review and acknowledge any pending alerts in the SCADA system",
+          "hint": "Check the alerts panel. Some devices may show warning states that need acknowledgment."
+        },
+        {
+          "id": "scada-4",
+          "order": 4,
+          "title": "Configure Alarm Thresholds",
+          "description": "Set appropriate alarm thresholds for temperature monitoring",
+          "hint": "Find the configuration section for alarm settings. Temperature thresholds should be configurable between 60-80 degrees."
+        }
+      ]
+    },
+    {
+      "id": "plc-opcua",
+      "title": "PLC & OPC-UA Configuration",
+      "description": "Configure PLC simulators and establish secure OPC-UA communication",
+      "tasks": [
+        {
+          "id": "plc-1",
+          "order": 1,
+          "title": "Access PLC Simulator",
+          "description": "Connect to the PLC simulator and examine the running program",
+          "hint": "The PLC simulator runs on port 5000. Access it via web interface or terminal to view ladder logic."
+        },
+        {
+          "id": "plc-2",
+          "order": 2,
+          "title": "Modify PLC Tags",
+          "description": "Update the PLC tag values for tank level and valve positions",
+          "hint": "Use the PLC simulator interface to modify tags. Tank level should be 0-100%, valve positions are 0 (closed) or 1 (open)."
+        },
+        {
+          "id": "plc-3",
+          "order": 3,
+          "title": "Configure OPC-UA Server",
+          "description": "Set up the OPC-UA server to expose PLC data securely",
+          "hint": "The OPC-UA server configuration is in /etc/opcua/. Update the endpoint URL and enable security policies."
+        },
+        {
+          "id": "plc-4",
+          "order": 4,
+          "title": "Establish OPC-UA Connection",
+          "description": "Verify that SCADA can connect to OPC-UA server and read PLC data",
+          "hint": "Use the SCADA client to browse OPC-UA nodes. You should see all PLC tags available."
+        }
+      ]
+    },
+    {
+      "id": "mes-integration",
+      "title": "Data Historian & MES Integration",
+      "description": "Configure data historian collection and MES system integration",
+      "tasks": [
+        {
+          "id": "mes-1",
+          "order": 1,
+          "title": "Configure Data Historian",
+          "description": "Set up the data historian to collect process data at appropriate intervals",
+          "hint": "Edit the historian configuration in /etc/historian/. Set collection interval to 5 seconds for key tags."
+        },
+        {
+          "id": "mes-2",
+          "order": 2,
+          "title": "Create Production Records",
+          "description": "Create a production batch record in the MES system",
+          "hint": "Access the MES web interface. Navigate to production records and create a new batch with product ID and quantity."
+        },
+        {
+          "id": "mes-3",
+          "order": 3,
+          "title": "Link Historian to MES",
+          "description": "Associate collected data with the production batch in MES",
+          "hint": "In the MES system, link the historian data tags to the batch record created in the previous task."
+        },
+        {
+          "id": "mes-4",
+          "order": 4,
+          "title": "Generate Production Report",
+          "description": "Generate a production report combining MES and historian data",
+          "hint": "Use the reporting feature in MES to create a PDF report showing batch performance metrics."
+        },
+        {
+          "id": "mes-5",
+          "order": 5,
+          "title": "Implement Security Hardening",
+          "description": "Apply security best practices to the IIoT environment",
+          "hint": "Review and apply: firewall rules, OPC-UA security policies, disable unused services, update credentials."
+        }
+      ]
+    }
+  ],
+  "resources": [
+    {
+      "title": "SCADA Security Guide",
+      "type": "document",
+      "url": "/docs/scada-security.pdf"
+    },
+    {
+      "title": "OPC-UA Reference",
+      "type": "link",
+      "url": "https://reference.opcfoundation.org/"
+    }
+  ]
+}

@@ -1,3 +1,4 @@
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import router
@@ -10,11 +11,14 @@ from app.core.vm_manager import vm_manager
 
 app = FastAPI(title="CyberRanger API")
 
-# Configure CORS
+cors_origins = os.environ.get(
+    "CORS_ORIGINS",
+    "http://localhost:5173,http://localhost:3000"
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    # Allow all origins for local dev (no credentials).
-    allow_origins=["*"],
+    allow_origins=cors_origins,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -38,3 +42,7 @@ async def shutdown_event():
 @app.get("/")
 async def root():
     return {"message": "CyberRanger API is running"}
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy"}
