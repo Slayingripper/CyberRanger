@@ -282,8 +282,14 @@ async def submit_level(run_id: str, level_idx: int, payload: SubmitPayload):
             score = 100
 
     ls = run.level_states[level_idx]
+
+    if payload.task_id in ls.completed_tasks:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Task already completed (task_id={payload.task_id}, level_idx={level_idx})",
+        )
+
     ls.attempts += 1
-    ls.score = max(ls.score, score)
     record_event(
         run,
         "task_submitted",
@@ -295,17 +301,25 @@ async def submit_level(run_id: str, level_idx: int, payload: SubmitPayload):
     )
 
     if correct:
-        ls.ended_at = time.time()
-        ls.status = "completed"
-        if payload.task_id not in ls.completed_tasks:
-            ls.completed_tasks.append(payload.task_id)
-        record_event(run, "level_completed", level_idx=level_idx, task_id=payload.task_id, correct=True, score=score)
+        ls.score += score
+        ls.completed_tasks.append(payload.task_id)
+
+        total_tasks = len(level.get("tasks", []))
+        completed_task_ids = set(ls.completed_tasks)
+        level_complete = total_tasks == 0 or len(completed_task_ids) >= total_tasks
+
+        if level_complete:
+            ls.ended_at = time.time()
+            ls.status = "completed"
+            record_event(run, "level_completed", level_idx=level_idx, task_id=payload.task_id, correct=True, score=score)
+        else:
+            ls.status = "in_progress"
     else:
         ls.status = "in_progress"
 
     # advance to next level if correct
     next_idx = None
-    if correct:
+    if correct and ls.status == "completed":
         next_idx = level_idx + 1
         # mark completed and set next in_progress if exists
         if next_idx < len(run.level_states):
