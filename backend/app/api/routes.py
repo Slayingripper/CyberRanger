@@ -200,7 +200,7 @@ def _resolve_image_path(image_key: str) -> str:
     # Fallbacks for common variants
     patterns = []
     if image_key == "kali-linux":
-        patterns = ["kali-linux-*-qemu-amd64.qcow2", "kali*.qcow2"]
+        patterns = ["kali-linux-*-qemu-amd64.7z", "kali-linux-*-qemu-amd64.qcow2", "kali*.qcow2", "kali*.7z"]
     elif image_key == "ubuntu-20.04":
         patterns = ["ubuntu-20.04-server-cloudimg-amd64.img", "focal-server-cloudimg-amd64*.img", "ubuntu*20.04*cloudimg*amd64*.img"]
     elif image_key == "windows-10":
@@ -216,7 +216,7 @@ def _resolve_image_path(image_key: str) -> str:
     elif image_key in ("contiki-ng", "contiki"):
         patterns = ["contiki*.qcow2", "contiki*.img"]
     else:
-        patterns = [f"{image_key}.qcow2", f"{image_key}.img"]
+        patterns = [f"{image_key}.qcow2", f"{image_key}.img", f"{image_key}.7z"]
 
     for pat in patterns:
         candidates.extend(glob.glob(os.path.join(images_dir, pat)))

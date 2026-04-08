@@ -65,7 +65,7 @@ def ensure_cloud_init_defaults(cloud_init: Optional[Dict[str, Any]]) -> Optional
 
 def build_cloud_init_from_assets(assets: List[Dict[str, Any]]) -> Dict[str, Any]:
     packages, runcmds = build_cloud_init_assets(assets)
-    packages_str = "\n".join([f"  - {pkg}" for pkg in packages])
+    packages_str = "\n".join(packages)
     return ensure_cloud_init_defaults(
         {
             "username": DEFAULT_VM_USERNAME,

@@ -260,6 +260,130 @@ function TrainingEditor({ training, onSave, onCancel }) {
                                     />
                                 </div>
                             </div>
+                            
+                            {/* Assets/Automation Section */}
+                            <div className="border-t border-border pt-4 mt-4">
+                                <div className="flex justify-between items-center mb-3">
+                                    <label className="block text-sm font-medium text-secondary">Installation & Automation</label>
+                                    <button 
+                                        onClick={() => {
+                                            const currentAssets = editedTraining.levels[activeView].vm_config?.assets || [];
+                                            handleLevelChange(activeView, 'vm_config', { 
+                                                ...editedTraining.levels[activeView].vm_config, 
+                                                assets: [...currentAssets, { type: 'package', value: '' }]
+                                            });
+                                        }}
+                                        className="text-xs bg-accent px-2 py-1 rounded text-primary hover:bg-accentHover flex items-center gap-1"
+                                    >
+                                        <Plus size={12} /> Add Asset
+                                    </button>
+                                </div>
+                                <div className="space-y-2">
+                                    {(editedTraining.levels[activeView].vm_config?.assets || []).map((asset, idx) => (
+                                        <div key={idx} className="bg-background p-3 rounded border border-border">
+                                            <div className="flex gap-2 mb-2">
+                                                <select 
+                                                    value={asset.type}
+                                                    onChange={(e) => {
+                                                        const newType = e.target.value;
+                                                        const newAssets = [...editedTraining.levels[activeView].vm_config.assets];
+                                                        newAssets[idx] = { ...newAssets[idx], type: newType };
+                                                        if (newType === 'ansible') {
+                                                            newAssets[idx].playbook = newAssets[idx].playbook || `- name: Run Ansible Playbook\n  hosts: localhost\n  tasks:\n    - name: Example task\n      debug:\n        msg: "Hello from Ansible"`;
+                                                        }
+                                                        handleLevelChange(activeView, 'vm_config', { 
+                                                            ...editedTraining.levels[activeView].vm_config, 
+                                                            assets: newAssets 
+                                                        });
+                                                    }}
+                                                    className="bg-surface text-xs rounded p-1 text-primary border border-border"
+                                                >
+                                                    <option value="package">Install Package</option>
+                                                    <option value="command">Run Command</option>
+                                                    <option value="ansible">Ansible Playbook</option>
+                                                </select>
+                                                <button 
+                                                    onClick={() => {
+                                                        const newAssets = editedTraining.levels[activeView].vm_config.assets.filter((_, i) => i !== idx);
+                                                        handleLevelChange(activeView, 'vm_config', { 
+                                                            ...editedTraining.levels[activeView].vm_config, 
+                                                            assets: newAssets 
+                                                        });
+                                                    }} 
+                                                    className="ml-auto text-red-400 hover:text-red-300"
+                                                >
+                                                    <Trash2 size={14} />
+                                                </button>
+                                            </div>
+                                            {asset.type === 'ansible' ? (
+                                                <div className="space-y-2">
+                                                    <input 
+                                                        type="text" 
+                                                        value={asset.playbook_name || ''}
+                                                        onChange={(e) => {
+                                                            const newAssets = [...editedTraining.levels[activeView].vm_config.assets];
+                                                            newAssets[idx] = { ...newAssets[idx], playbook_name: e.target.value };
+                                                            handleLevelChange(activeView, 'vm_config', { 
+                                                                ...editedTraining.levels[activeView].vm_config, 
+                                                                assets: newAssets 
+                                                            });
+                                                        }}
+                                                        placeholder="playbook.yml (optional name)"
+                                                        className="w-full bg-surface border border-border rounded p-2 text-sm text-primary"
+                                                    />
+                                                    <textarea 
+                                                        value={asset.playbook || ''}
+                                                        onChange={(e) => {
+                                                            const newAssets = [...editedTraining.levels[activeView].vm_config.assets];
+                                                            newAssets[idx] = { ...newAssets[idx], playbook: e.target.value };
+                                                            handleLevelChange(activeView, 'vm_config', { 
+                                                                ...editedTraining.levels[activeView].vm_config, 
+                                                                assets: newAssets 
+                                                            });
+                                                        }}
+                                                        placeholder="- name: Install nginx\n  hosts: localhost\n  tasks:\n    - apt:\n        name: nginx\n        state: present"
+                                                        className="w-full bg-surface border border-border rounded p-2 text-sm text-primary font-mono text-xs min-h-[120px]"
+                                                    />
+                                                    <div className="flex items-center gap-2">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={asset.install !== false}
+                                                            onChange={(e) => {
+                                                                const newAssets = [...editedTraining.levels[activeView].vm_config.assets];
+                                                                newAssets[idx] = { ...newAssets[idx], install: e.target.checked };
+                                                                handleLevelChange(activeView, 'vm_config', { 
+                                                                    ...editedTraining.levels[activeView].vm_config, 
+                                                                    assets: newAssets 
+                                                                });
+                                                            }}
+                                                            className="rounded"
+                                                        />
+                                                        <span className="text-xs text-secondary">Install Ansible first</span>
+                                                    </div>
+                                                </div>
+                                            ) : (
+                                                <input 
+                                                    type="text" 
+                                                    value={asset.value}
+                                                    onChange={(e) => {
+                                                        const newAssets = [...editedTraining.levels[activeView].vm_config.assets];
+                                                        newAssets[idx] = { ...newAssets[idx], value: e.target.value };
+                                                        handleLevelChange(activeView, 'vm_config', { 
+                                                            ...editedTraining.levels[activeView].vm_config, 
+                                                            assets: newAssets 
+                                                        });
+                                                    }}
+                                                    placeholder={asset.type === 'package' ? 'e.g. nginx' : 'e.g. systemctl start nginx'}
+                                                    className="w-full bg-surface border border-border rounded p-2 text-sm text-primary"
+                                                />
+                                            )}
+                                        </div>
+                                    ))}
+                                    {(!editedTraining.levels[activeView].vm_config?.assets || editedTraining.levels[activeView].vm_config.assets.length === 0) && (
+                                        <div className="text-xs text-secondary italic text-center py-2">No automation assets defined</div>
+                                    )}
+                                </div>
+                            </div>
                         </div>
 
                         {/* Tasks */}

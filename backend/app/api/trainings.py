@@ -39,10 +39,10 @@ def _save_creds_cache(cache: Dict[str, Dict[str, str]]) -> None:
 IMAGE_ALIASES = {
     "ubuntu-20.04": "focal-server-cloudimg-amd64.img",
     "ubuntu-22.04": "jammy-server-cloudimg-amd64.img",
-    "kali-linux": "kali-linux-2025.4-qemu-amd64.qcow2",
+    "kali-linux": "kali-linux-2025.4-qemu-amd64.7z",
     "debian-12": "debian-12-generic-amd64.qcow2",
     "alpine-edge": "alpine-edge.qcow2",
-    "opnsense": "OPNsense.qcow2",
+    "opnsense": "opnsense.img",
 }
 
 IMAGE_DOWNLOAD_SOURCES = {

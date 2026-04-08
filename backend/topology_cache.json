@@ -1,1 +1,1 @@
-{"nodes": [{"id": "1", "type": "custom", "data": {"label": "Internet Gateway", "image": "gateway", "cpu": 1, "ram": 512, "assets": []}, "position": {"x": 250, "y": 5}, "width": 212, "height": 68}], "edges": [], "scenario": {"name": "New Scenario", "team": "blue", "objective": "Defend the network against incoming attacks.", "difficulty": "easy", "network_prefix": ""}, "viewport": {"x": -32, "y": 321, "zoom": 2}}
+{}

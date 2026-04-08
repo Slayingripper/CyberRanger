@@ -1280,29 +1280,79 @@ const NetworkBuilder = () => {
                                 </button>
                             </div>
                             
-                            <div className="space-y-2">
+                                <div className="space-y-2">
                                 {selectedNode.data.assets && selectedNode.data.assets.map((asset, idx) => (
                                     <div key={idx} className="bg-surface p-2 rounded border border-border">
                                         <div className="flex gap-2 mb-2">
                                             <select 
                                                 value={asset.type}
-                                                onChange={(e) => updateAsset(idx, 'type', e.target.value)}
+                                                onChange={(e) => {
+                                                    const newType = e.target.value;
+                                                    updateAsset(idx, 'type', newType);
+                                                    if (newType === 'ansible') {
+                                                        updateAsset(idx, 'playbook', asset.playbook || `- name: Run Ansible Playbook\n  hosts: localhost\n  tasks:\n    - name: Example task\n      debug:\n        msg: "Hello from Ansible"`);
+                                                    }
+                                                }}
                                                 className="bg-surfaceHover text-xs rounded p-1 text-primary border border-border"
                                             >
                                                 <option value="package">Install Package</option>
                                                 <option value="command">Run Command</option>
+                                                <option value="ansible">Ansible Playbook</option>
                                             </select>
                                             <button onClick={() => removeAsset(idx)} className="ml-auto text-red-400 hover:text-red-300">
                                                 <Trash2 size={14} />
                                             </button>
                                         </div>
-                                        <input 
-                                            type="text" 
-                                            value={asset.value}
-                                            onChange={(e) => updateAsset(idx, 'value', e.target.value)}
-                                            placeholder={asset.type === 'package' ? 'e.g. nginx' : 'e.g. systemctl start nginx'}
-                                            className="w-full bg-surfaceHover border border-border rounded p-1 text-sm text-primary focus:border-accent outline-none"
-                                        />
+                                        {asset.type === 'ansible' ? (
+                                            <div className="space-y-2">
+                                                <input 
+                                                    type="text" 
+                                                    value={asset.playbook_name || ''}
+                                                    onChange={(e) => updateAsset(idx, 'playbook_name', e.target.value)}
+                                                    placeholder="playbook.yml (optional name)"
+                                                    className="w-full bg-surfaceHover border border-border rounded p-1 text-sm text-primary focus:border-accent outline-none"
+                                                />
+                                                <textarea 
+                                                    value={asset.playbook || ''}
+                                                    onChange={(e) => updateAsset(idx, 'playbook', e.target.value)}
+                                                    placeholder="- name: My playbook\n  hosts: localhost\n  tasks:\n    - name: Install nginx\n      apt:\n        name: nginx\n        state: present"
+                                                    className="w-full bg-surfaceHover border border-border rounded p-2 text-sm text-primary focus:border-accent outline-none font-mono text-xs min-h-[150px]"
+                                                />
+                                                <div className="flex items-center gap-2">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={asset.install !== false}
+                                                        onChange={(e) => updateAsset(idx, 'install', e.target.checked)}
+                                                        className="rounded"
+                                                    />
+                                                    <span className="text-xs text-secondary">Install Ansible first</span>
+                                                </div>
+                                                <details className="text-xs">
+                                                    <summary className="cursor-pointer text-secondary hover:text-primary">Extra Variables (JSON)</summary>
+                                                    <textarea
+                                                        value={asset.extra_vars ? JSON.stringify(asset.extra_vars, null, 2) : ''}
+                                                        onChange={(e) => {
+                                                            try {
+                                                                const parsed = e.target.value ? JSON.parse(e.target.value) : null;
+                                                                updateAsset(idx, 'extra_vars', parsed);
+                                                            } catch (err) {
+                                                                // Allow invalid JSON while typing
+                                                            }
+                                                        }}
+                                                        placeholder='{"key": "value"}'
+                                                        className="w-full mt-1 bg-surfaceHover border border-border rounded p-1 text-xs text-primary font-mono"
+                                                    />
+                                                </details>
+                                            </div>
+                                        ) : (
+                                            <input 
+                                                type="text" 
+                                                value={asset.value}
+                                                onChange={(e) => updateAsset(idx, 'value', e.target.value)}
+                                                placeholder={asset.type === 'package' ? 'e.g. nginx' : 'e.g. systemctl start nginx'}
+                                                className="w-full bg-surfaceHover border border-border rounded p-1 text-sm text-primary focus:border-accent outline-none"
+                                            />
+                                        )}
                                     </div>
                                 ))}
                                 {(!selectedNode.data.assets || selectedNode.data.assets.length === 0) && (
