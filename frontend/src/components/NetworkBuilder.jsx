@@ -14,6 +14,7 @@ import axios from 'axios';
 import CustomNode from './CustomNode';
 import Modal from './Modal';
 import { getApiUrl } from '../lib/api';
+import { useAuth } from '../context/AuthContext';
 
 const initialNodes = [
   {
@@ -126,13 +127,57 @@ const SCENARIO_DEFAULTS = {
     network_prefix: ''
 };
 
+const normalizeEdgeNetworkConfig = (config = {}) => ({
+    segment: typeof config.segment === 'string' ? config.segment : '',
+    mode: config.mode === 'isolated' ? 'isolated' : 'nat',
+    vlan_id: config.vlan_id ?? '',
+});
+
+const hasCustomEdgeNetworkConfig = (config = {}) => {
+    const normalized = normalizeEdgeNetworkConfig(config);
+    return Boolean(normalized.segment.trim() || normalized.vlan_id !== '' || normalized.mode !== 'nat');
+};
+
+const edgeNetworkLabel = (config = {}) => {
+    const normalized = normalizeEdgeNetworkConfig(config);
+    const parts = [];
+    if (normalized.segment.trim()) {
+        parts.push(normalized.segment.trim());
+    }
+    if (normalized.vlan_id !== '') {
+        parts.push(`VLAN ${normalized.vlan_id}`);
+    }
+    if (normalized.mode === 'isolated') {
+        parts.push('isolated');
+    }
+    return parts.join(' · ');
+};
+
+const hydrateEdge = (edge, index = 0) => {
+    const network = normalizeEdgeNetworkConfig(edge?.data?.network || edge?.config || {});
+    const label = edgeNetworkLabel(network);
+    return {
+        ...edge,
+        id: edge?.id || `e${index}`,
+        data: {
+            ...(edge?.data || {}),
+            network,
+        },
+        label: label || undefined,
+    };
+};
+
+const hydrateEdges = (rawEdges = []) => (Array.isArray(rawEdges) ? rawEdges.map((edge, index) => hydrateEdge(edge, index)) : []);
+
 const NetworkBuilder = () => {
+    const { user } = useAuth();
   const reactFlowWrapper = useRef(null);
     const cacheTimerRef = useRef(null);
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [reactFlowInstance, setReactFlowInstance] = useState(null);
   const [selectedNode, setSelectedNode] = useState(null);
+  const [selectedEdge, setSelectedEdge] = useState(null);
   const [availableImages, setAvailableImages] = useState([]);
     const [runtimeVms, setRuntimeVms] = useState([]);
     const [viewportRestored, setViewportRestored] = useState(false);
@@ -151,6 +196,9 @@ const NetworkBuilder = () => {
     const [deployJob, setDeployJob] = useState(null);
     const [deployJobError, setDeployJobError] = useState(null);
     const [messageModal, setMessageModal] = useState({ isOpen: false, title: '', message: '', type: 'info' });
+
+    const topologyStorageKey = useMemo(() => user ? `networkTopology:${user.id}` : 'networkTopology', [user]);
+    const deployJobStorageKey = useMemo(() => user ? `deployJobId:${user.id}` : 'deployJobId', [user]);
 
   const nodeTypes = useMemo(() => ({ custom: CustomNode }), []);
 
@@ -218,6 +266,7 @@ const NetworkBuilder = () => {
   const connectionList = useMemo(() => edges.map(e => {
       const src = nodeMap[e.source];
       const dst = nodeMap[e.target];
+      const network = normalizeEdgeNetworkConfig(e?.data?.network || e?.config || {});
       return {
           id: e.id,
           source: e.source,
@@ -225,18 +274,19 @@ const NetworkBuilder = () => {
           srcLabel: src?.data?.label || e.source,
           dstLabel: dst?.data?.label || e.target,
           srcIp: primaryIp(nodeVmInfoMap[e.source]),
-          dstIp: primaryIp(nodeVmInfoMap[e.target])
+          dstIp: primaryIp(nodeVmInfoMap[e.target]),
+          networkLabel: edgeNetworkLabel(network),
       };
   }), [edges, nodeMap, nodeVmInfoMap, primaryIp]);
 
   // Persistence Logic - Load saved topology on mount
   useEffect(() => {
-      const saved = localStorage.getItem('networkTopology');
+      const saved = localStorage.getItem(topologyStorageKey);
       if (saved) {
           try {
               const { nodes: savedNodes, edges: savedEdges, scenario: savedScenario } = JSON.parse(saved);
               if (Array.isArray(savedNodes)) setNodes(savedNodes);
-              if (Array.isArray(savedEdges)) setEdges(savedEdges);
+              if (Array.isArray(savedEdges)) setEdges(hydrateEdges(savedEdges));
               if (savedScenario) setScenarioConfig(savedScenario);
               return;
           } catch (err) {
@@ -254,19 +304,19 @@ const NetworkBuilder = () => {
                   const savedNodes = topo.nodes || [];
                   const savedEdges = topo.edges || [];
                   if (Array.isArray(savedNodes)) setNodes(savedNodes);
-                  if (Array.isArray(savedEdges)) setEdges(savedEdges);
+                  if (Array.isArray(savedEdges)) setEdges(hydrateEdges(savedEdges));
                   if (topo.scenario) setScenarioConfig(topo.scenario);
               }
           } catch (err) {
               // Ignore if no cached topology exists
           }
       })();
-  }, []);
+    }, [topologyStorageKey]);
 
   // Restore viewport when ReactFlow instance is ready
   useEffect(() => {
       if (reactFlowInstance && !viewportRestored) {
-          const saved = localStorage.getItem('networkTopology');
+          const saved = localStorage.getItem(topologyStorageKey);
           if (saved) {
               try {
                   const { viewport } = JSON.parse(saved);
@@ -295,14 +345,14 @@ const NetworkBuilder = () => {
               }, 100);
           }
       }
-  }, [reactFlowInstance, viewportRestored]);
+    }, [reactFlowInstance, topologyStorageKey, viewportRestored]);
 
   // Save topology when it changes
   useEffect(() => {
       if (nodes.length > 0 || edges.length > 0) {
           const viewport = reactFlowInstance ? reactFlowInstance.getViewport() : null;
           const topology = { nodes, edges, scenario: scenarioConfig, viewport };
-          localStorage.setItem('networkTopology', JSON.stringify(topology));
+          localStorage.setItem(topologyStorageKey, JSON.stringify(topology));
 
           if (cacheTimerRef.current) {
               clearTimeout(cacheTimerRef.current);
@@ -315,7 +365,7 @@ const NetworkBuilder = () => {
               }
           }, 750);
       }
-  }, [nodes, edges, scenarioConfig, reactFlowInstance]);
+    }, [nodes, edges, scenarioConfig, reactFlowInstance, topologyStorageKey]);
 
   const buildTopologyPayload = () => ({
       scenario: scenarioConfig,
@@ -333,20 +383,31 @@ const NetworkBuilder = () => {
               password: n.data.password || null
           }
       })),
-      edges: edges.map(e => ({
-          id: e.id,
-          source: e.source,
-          target: e.target
-      }))
+      edges: edges.map(e => {
+          const payload = {
+              id: e.id,
+              source: e.source,
+              target: e.target,
+          };
+          if (hasCustomEdgeNetworkConfig(e?.data?.network)) {
+              payload.config = {
+                  segment: (e.data.network.segment || '').trim() || null,
+                  mode: e.data.network.mode || 'nat',
+                  vlan_id: e.data.network.vlan_id === '' ? null : Number(e.data.network.vlan_id),
+              };
+          }
+          return payload;
+      })
   });
 
   const handleClearTopology = async () => {
       setNodes([]);
       setEdges([]);
       setSelectedNode(null);
+    setSelectedEdge(null);
       setScenarioConfig({ ...SCENARIO_DEFAULTS });
-      localStorage.removeItem('networkTopology');
-      localStorage.removeItem('deployJobId');
+    localStorage.removeItem(topologyStorageKey);
+    localStorage.removeItem(deployJobStorageKey);
       setDeployJob(null);
       setDeployJobId(null);
       setDeployJobError(null);
@@ -363,7 +424,7 @@ const NetworkBuilder = () => {
       const topology = buildTopologyPayload();
       const viewport = reactFlowInstance ? reactFlowInstance.getViewport() : null;
       const cachedTopology = { ...topology, viewport };
-      localStorage.setItem('networkTopology', JSON.stringify(cachedTopology));
+    localStorage.setItem(topologyStorageKey, JSON.stringify(cachedTopology));
       try {
           await axios.post(`${API_URL}/topology/cache`, cachedTopology);
       } catch (err) {
@@ -389,12 +450,12 @@ const NetworkBuilder = () => {
   useEffect(() => {
       const saveViewport = () => {
           if (reactFlowInstance) {
-              const saved = localStorage.getItem('networkTopology');
+              const saved = localStorage.getItem(topologyStorageKey);
               if (saved) {
                   try {
                       const topology = JSON.parse(saved);
                       topology.viewport = reactFlowInstance.getViewport();
-                      localStorage.setItem('networkTopology', JSON.stringify(topology));
+                      localStorage.setItem(topologyStorageKey, JSON.stringify(topology));
                   } catch (err) {
                       console.error('Failed to save viewport', err);
                   }
@@ -412,7 +473,7 @@ const NetworkBuilder = () => {
           document.removeEventListener('visibilitychange', saveViewport);
           saveViewport();
       };
-  }, [reactFlowInstance]);
+    }, [reactFlowInstance, topologyStorageKey]);
 
   useEffect(() => {
       const fetchImages = async () => {
@@ -472,7 +533,9 @@ const NetworkBuilder = () => {
               source: e.source,
               target: e.target
           }));
-          setEdges(newEdges);
+          setSelectedNode(null);
+          setSelectedEdge(null);
+          setEdges(hydrateEdges(newEdges));
 
           if (topo.scenario) {
               setScenarioConfig({ ...SCENARIO_DEFAULTS, ...(topo.scenario || {}) });
@@ -522,7 +585,9 @@ const NetworkBuilder = () => {
               source: e.source,
               target: e.target
           }));
-          setEdges(newEdges);
+          setSelectedNode(null);
+          setSelectedEdge(null);
+          setEdges(hydrateEdges(newEdges));
           if (topo.scenario) {
               setScenarioConfig({ ...SCENARIO_DEFAULTS, ...(topo.scenario || {}) });
           }
@@ -569,7 +634,7 @@ const NetworkBuilder = () => {
   }, [isDeploying]);
 
   const onConnect = useCallback(
-    (params) => setEdges((eds) => addEdge(params, eds)),
+        (params) => setEdges((eds) => addEdge(hydrateEdge({ ...params, data: { network: normalizeEdgeNetworkConfig() } }, eds.length), eds)),
     [],
   );
 
@@ -609,9 +674,12 @@ const NetworkBuilder = () => {
                   const newEdges = parsed.edges.map((e, idx) => ({
                       id: e.id || `e${idx}`,
                       source: e.source,
-                      target: e.target
+                      target: e.target,
+                      config: e.config || null,
                   }));
-                  setEdges(newEdges);
+                  setSelectedNode(null);
+                  setSelectedEdge(null);
+                  setEdges(hydrateEdges(newEdges));
               }
               
               setMessageModal({ isOpen: true, title: 'Success', message: 'Topology loaded successfully!', type: 'success' });
@@ -627,7 +695,9 @@ const NetworkBuilder = () => {
       const preset = PREDEFINED_TOPOLOGIES[presetName];
       if (preset) {
           setNodes(preset.nodes);
-          setEdges(preset.edges);
+          setSelectedNode(null);
+          setSelectedEdge(null);
+          setEdges(hydrateEdges(preset.edges));
           if (preset.scenario) setScenarioConfig({ ...SCENARIO_DEFAULTS, ...(preset.scenario || {}) });
       }
   };
@@ -675,8 +745,14 @@ const NetworkBuilder = () => {
   );
 
   const onNodeClick = (event, node) => {
+        setSelectedEdge(null);
     setSelectedNode(node);
   };
+
+    const onEdgeClick = useCallback((event, edge) => {
+            setSelectedNode(null);
+            setSelectedEdge(hydrateEdge(edge));
+    }, []);
 
   const updateNodeData = (key, value) => {
     if (!selectedNode) return;
@@ -693,6 +769,31 @@ const NetworkBuilder = () => {
         return node;
       })
     );
+  };
+
+  const updateEdgeNetwork = (key, value) => {
+      if (!selectedEdge) return;
+
+      setEdges((currentEdges) =>
+          currentEdges.map((edge) => {
+              if (edge.id !== selectedEdge.id) {
+                  return edge;
+              }
+
+              const currentNetwork = normalizeEdgeNetworkConfig(edge?.data?.network || {});
+              const nextNetwork = { ...currentNetwork, [key]: value };
+              const updatedEdge = {
+                  ...edge,
+                  data: {
+                      ...(edge.data || {}),
+                      network: nextNetwork,
+                  },
+                  label: edgeNetworkLabel(nextNetwork) || undefined,
+              };
+              setSelectedEdge(updatedEdge);
+              return updatedEdge;
+          })
+      );
   };
 
   const addAsset = () => {
@@ -717,12 +818,12 @@ const NetworkBuilder = () => {
 
   // Restore deploy job on mount
   useEffect(() => {
-      const savedJobId = localStorage.getItem('deployJobId');
+      const savedJobId = localStorage.getItem(deployJobStorageKey);
       if (savedJobId) {
           setDeployJobId(savedJobId);
           setIsDeploying(true);
       }
-  }, []);
+  }, [deployJobStorageKey]);
 
   // Poll for deploy job status
   useEffect(() => {
@@ -741,7 +842,7 @@ const NetworkBuilder = () => {
               
               if (status === 'completed' || status === 'failed') {
                   setIsDeploying(false);
-                  localStorage.removeItem('deployJobId');
+                  localStorage.removeItem(deployJobStorageKey);
                   setDeployJobId(null);
                   
                   const result = jobRes.data?.result;
@@ -765,9 +866,9 @@ const NetworkBuilder = () => {
           } catch (e) {
               console.error("Poll error:", e);
               if (isMounted) {
-                   if (e.response && e.response.status === 404) {
+                   if (e.response && (e.response.status === 404 || e.response.status === 403)) {
                        setIsDeploying(false);
-                       localStorage.removeItem('deployJobId');
+                       localStorage.removeItem(deployJobStorageKey);
                        setDeployJobId(null);
                    } else {
                        timeoutId = setTimeout(poll, 2000);
@@ -782,7 +883,7 @@ const NetworkBuilder = () => {
           isMounted = false; 
           if (timeoutId) clearTimeout(timeoutId);
       };
-  }, [deployJobId]);
+    }, [deployJobId, deployJobStorageKey]);
 
   const handleDeploy = async () => {
       if (nodes.length === 0) {
@@ -803,7 +904,7 @@ const NetworkBuilder = () => {
               throw new Error('Backend did not return a job_id');
           }
           setDeployJobId(jobId);
-          localStorage.setItem('deployJobId', jobId);
+          localStorage.setItem(deployJobStorageKey, jobId);
       } catch (e) {
           console.error("Deployment error:", e);
           const errorMsg = e.response?.data?.detail || e.message || 'Unknown error';
@@ -1071,7 +1172,7 @@ const NetworkBuilder = () => {
                                 {connectionList.map(conn => (
                                     <div key={conn.id} className="bg-surface border border-border rounded px-2 py-1 flex justify-between items-center">
                                         <div className="truncate" title={conn.srcLabel}>{conn.srcLabel} {conn.srcIp ? `(${conn.srcIp})` : ''}</div>
-                                        <div className="text-secondary mx-2">↔</div>
+                                        <div className="text-secondary mx-2 flex-shrink-0">{conn.networkLabel ? `${conn.networkLabel} ↔` : '↔'}</div>
                                         <div className="truncate text-right" title={conn.dstLabel}>{conn.dstLabel} {conn.dstIp ? `(${conn.dstIp})` : ''}</div>
                                     </div>
                                 ))}
@@ -1089,15 +1190,20 @@ const NetworkBuilder = () => {
                     onDrop={onDrop}
                     onDragOver={onDragOver}
                     onNodeClick={onNodeClick}
+                    onEdgeClick={onEdgeClick}
+                    onPaneClick={() => {
+                        setSelectedNode(null);
+                        setSelectedEdge(null);
+                    }}
                     onMove={() => {
                         // Save viewport position as user moves around
                         if (reactFlowInstance && viewportRestored) {
-                            const saved = localStorage.getItem('networkTopology');
+                            const saved = localStorage.getItem(topologyStorageKey);
                             if (saved) {
                                 try {
                                     const topology = JSON.parse(saved);
                                     topology.viewport = reactFlowInstance.getViewport();
-                                    localStorage.setItem('networkTopology', JSON.stringify(topology));
+                                    localStorage.setItem(topologyStorageKey, JSON.stringify(topology));
                                 } catch (err) {
                                     // Silently fail to avoid console spam
                                 }
@@ -1359,6 +1465,68 @@ const NetworkBuilder = () => {
                                     <div className="text-xs text-secondary italic text-center py-2">No assets defined</div>
                                 )}
                             </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {selectedEdge && !selectedNode && (
+                <div className="w-80 bg-background border-l border-border p-4 overflow-y-auto z-10 shadow-xl">
+                    <div className="flex justify-between items-center mb-4">
+                        <div>
+                            <h3 className="text-lg font-semibold text-primary">Connection</h3>
+                            <div className="text-xs text-secondary mt-1">
+                                {(nodeMap[selectedEdge.source]?.data?.label || selectedEdge.source)} ↔ {(nodeMap[selectedEdge.target]?.data?.label || selectedEdge.target)}
+                            </div>
+                        </div>
+                        <button onClick={() => setSelectedEdge(null)} className="text-secondary hover:text-primary text-xl">&times;</button>
+                    </div>
+
+                    <div className="space-y-4">
+                        <div>
+                            <label className="block text-sm text-secondary mb-1">Segment Name</label>
+                            <input
+                                type="text"
+                                value={normalizeEdgeNetworkConfig(selectedEdge?.data?.network).segment}
+                                onChange={(e) => updateEdgeNetwork('segment', e.target.value)}
+                                placeholder="e.g. dmz, corp-lan, ot"
+                                className="w-full bg-surface border border-border rounded p-2 text-primary focus:border-accent outline-none"
+                            />
+                            <p className="text-xs text-secondary mt-1">
+                                Reuse the same segment name on multiple links to place them on the same custom network.
+                            </p>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3">
+                            <div>
+                                <label className="block text-sm text-secondary mb-1">Mode</label>
+                                <select
+                                    value={normalizeEdgeNetworkConfig(selectedEdge?.data?.network).mode}
+                                    onChange={(e) => updateEdgeNetwork('mode', e.target.value)}
+                                    className="w-full bg-surface border border-border rounded p-2 text-primary focus:border-accent outline-none"
+                                >
+                                    <option value="nat">NAT</option>
+                                    <option value="isolated">Isolated</option>
+                                </select>
+                            </div>
+
+                            <div>
+                                <label className="block text-sm text-secondary mb-1">VLAN ID</label>
+                                <input
+                                    type="number"
+                                    min="1"
+                                    max="4094"
+                                    value={normalizeEdgeNetworkConfig(selectedEdge?.data?.network).vlan_id}
+                                    onChange={(e) => updateEdgeNetwork('vlan_id', e.target.value)}
+                                    placeholder="optional"
+                                    className="w-full bg-surface border border-border rounded p-2 text-primary focus:border-accent outline-none"
+                                />
+                            </div>
+                        </div>
+
+                        <div className="rounded-lg border border-border bg-surface p-3 text-xs text-secondary leading-6">
+                            Links without a segment keep the current automatic component-based networking. Once you configure a link here,
+                            it becomes a dedicated deployable network and shared nodes can pick up multiple interfaces.
                         </div>
                     </div>
                 </div>

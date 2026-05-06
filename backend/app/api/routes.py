@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from app.core.vm_manager import vm_manager, WORK_DIR
@@ -15,6 +15,16 @@ from app.core.deploy_automation import execute_automation_steps, normalize_autom
 from app.core.provisioning import build_cloud_init_from_assets, cloud_init_credentials
 
 from app.core.deploy_jobs import new_job, get_job, update_job, update_progress, set_progress_path
+from app.core.auth import AuthenticatedUser, require_admin_user, require_authenticated_user
+from app.core.ownership import (
+    can_access_vm,
+    filter_vms_for_user,
+    get_topology_cache_for_user,
+    get_vm_record,
+    register_vm,
+    remove_vm,
+    save_topology_cache_for_user,
+)
 import xml.etree.ElementTree as ET
 
 router = APIRouter()
@@ -66,20 +76,51 @@ def _save_deployments(data):
     with open(DEPLOYMENTS_FILE, "w") as f:
         json.dump(data, f)
 
+
+def _deployment_visible_to_user(deployment: Dict[str, Any], current_user: AuthenticatedUser) -> bool:
+    if current_user.role == "admin":
+        return True
+    return deployment.get("owner_id") == current_user.id
+
+
+def _filter_deployments_for_user(deployments: Dict[str, Any], current_user: AuthenticatedUser) -> Dict[str, Any]:
+    if current_user.role == "admin":
+        return deployments
+    return {
+        dep_id: dep
+        for dep_id, dep in deployments.items()
+        if isinstance(dep, dict) and _deployment_visible_to_user(dep, current_user)
+    }
+
+
+def _require_vm_access(name: str, current_user: AuthenticatedUser) -> None:
+    if not can_access_vm(name, current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have access to this virtual machine")
+
+
+def _sanitize_vm_label(label: str, fallback: str) -> str:
+    safe_name = "".join(c for c in label if c.isalnum() or c in ("-", "_")).strip()
+    return safe_name or fallback
+
+
+def _scoped_vm_name(node_label: str, node_id: str, deployment_prefix: Optional[str]) -> str:
+    safe_name = _sanitize_vm_label(node_label, f"vm_{node_id}")
+    if deployment_prefix:
+        return f"{deployment_prefix}_{safe_name}_{node_id}"
+    return f"{safe_name}_{node_id}"
+
 @router.get("/topology/cache")
-async def get_topology_cache():
-    data = _load_topology_cache()
-    if data:
-        return data
-    return {}
+async def get_topology_cache(current_user: AuthenticatedUser = Depends(require_authenticated_user)):
+    entry = get_topology_cache_for_user(current_user)
+    return {"topology": (entry or {}).get("topology") or {}, "updated_at": (entry or {}).get("updated_at")}
 
 @router.post("/topology/cache")
-async def save_topology_cache(topology: Dict[str, Any]):
-    _save_topology_cache(topology)
-    return {"status": "cached"}
+async def save_topology_cache(topology: Dict[str, Any], current_user: AuthenticatedUser = Depends(require_authenticated_user)):
+    saved = save_topology_cache_for_user(current_user, topology)
+    return {"status": "cached", "updated_at": saved["updated_at"]}
 
 @router.get("/deployments")
-async def get_deployments():
+async def get_deployments(current_user: AuthenticatedUser = Depends(require_authenticated_user)):
     deployments = _load_deployments()
     try:
         vm_manager.cleanup_unused_networks()
@@ -112,12 +153,12 @@ async def get_deployments():
         for dep_id in ids_to_remove:
             del deployments[dep_id]
         _save_deployments(deployments)
-            
-    return deployments
+
+    return _filter_deployments_for_user(deployments, current_user)
 
 
 @router.post("/networks/cleanup")
-async def cleanup_networks():
+async def cleanup_networks(_admin_user: AuthenticatedUser = Depends(require_admin_user)):
     try:
         removed = vm_manager.cleanup_unused_networks()
         return {"status": "cleaned", "removed": removed, "count": len(removed)}
@@ -268,6 +309,130 @@ def _is_opnsense_node(node: Any) -> bool:
         return False
 
 
+def _normalize_network_mode(mode: Optional[str]) -> str:
+    normalized = (mode or "nat").strip().lower()
+    if normalized not in {"nat", "isolated"}:
+        raise ValueError("Network mode must be either 'nat' or 'isolated'")
+    return normalized
+
+
+def _normalize_vlan_id(vlan_id: Optional[int]) -> Optional[int]:
+    if vlan_id in (None, ""):
+        return None
+    try:
+        normalized = int(vlan_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("VLAN ID must be an integer between 1 and 4094") from exc
+    if normalized < 1 or normalized > 4094:
+        raise ValueError("VLAN ID must be between 1 and 4094")
+    return normalized
+
+
+def _edge_has_custom_network(edge: Any) -> bool:
+    config = getattr(edge, "config", None)
+    if config is None:
+        return False
+    segment = (getattr(config, "segment", None) or "").strip()
+    mode = (getattr(config, "mode", None) or "nat").strip().lower()
+    vlan_id = getattr(config, "vlan_id", None)
+    return bool(segment or vlan_id is not None or mode != "nat")
+
+
+def _append_network_assignment(node_networks: Dict[str, List[str]], node_id: str, network_name: str) -> None:
+    assigned = node_networks.setdefault(node_id, [])
+    if network_name not in assigned:
+        assigned.append(network_name)
+
+
+def _ensure_planned_network(network_name: str, mode: str, seed: str, used_thirds: set[int]) -> None:
+    bridge_hash = hashlib.sha1(network_name.encode("utf-8")).hexdigest()[:10]
+    bridge = f"cr{bridge_hash}"[:15]
+    if mode == "isolated":
+        ok = vm_manager.ensure_isolated_network(network_name, bridge)
+        if not ok and not _reuse_existing_network(network_name):
+            raise RuntimeError(f"Failed to create isolated network {network_name}")
+        return
+
+    third = _pick_nat_third(seed, used_thirds)
+    gateway = f"192.168.{third}.1"
+    ok = vm_manager.ensure_network(network_name, bridge, gateway)
+    if not ok and not _reuse_existing_network(network_name):
+        raise RuntimeError(f"Failed to create network {network_name}")
+
+
+def _plan_topology_network_assignments(topology: "TopologyDeployRequest", slug: str) -> Dict[str, List[str]]:
+    node_networks: Dict[str, List[str]] = {node.id: [] for node in topology.nodes}
+    used_thirds = _active_nat_third_octets()
+    explicit_node_ids: set[str] = set()
+    explicit_networks: Dict[str, str] = {}
+    implicit_edges: List[TopologyEdge] = []
+
+    for edge in topology.edges:
+        if not _edge_has_custom_network(edge):
+            implicit_edges.append(edge)
+            continue
+
+        config = edge.config or TopologyEdgeConfig()
+        mode = _normalize_network_mode(config.mode)
+        vlan_id = _normalize_vlan_id(config.vlan_id)
+        segment_base = (config.segment or "").strip() or f"{edge.source}-{edge.target}"
+        segment_slug = _slugify(segment_base)
+        if vlan_id is not None:
+            segment_slug = f"{segment_slug}-vlan{vlan_id}"
+
+        explicit_key = f"{mode}:{segment_slug}"
+        network_name = explicit_networks.get(explicit_key)
+        if not network_name:
+            network_name = f"cyberange-{slug}-seg-{segment_slug}"
+            _ensure_planned_network(network_name, mode, f"{slug}:{explicit_key}", used_thirds)
+            explicit_networks[explicit_key] = network_name
+
+        for node_id in (edge.source, edge.target):
+            if node_id in node_networks:
+                _append_network_assignment(node_networks, node_id, network_name)
+                explicit_node_ids.add(node_id)
+
+    implicit_edge_node_ids = {
+        node_id
+        for edge in implicit_edges
+        for node_id in (edge.source, edge.target)
+        if node_id in node_networks
+    }
+    component_node_ids = [
+        node.id
+        for node in topology.nodes
+        if node.id in implicit_edge_node_ids or node.id not in explicit_node_ids
+    ]
+
+    if not component_node_ids:
+        return {node_id: nets for node_id, nets in node_networks.items() if nets}
+
+    comp_map = _connected_components(component_node_ids, implicit_edges)
+    if not comp_map:
+        return {node_id: nets for node_id, nets in node_networks.items() if nets}
+
+    opnsense_nodes = {node.id for node in topology.nodes if _is_opnsense_node(node)}
+    max_comp = max(comp_map.values())
+    for cid in range(0, max_comp + 1):
+        members = [node_id for node_id, component_id in comp_map.items() if component_id == cid]
+        has_opnsense = any(node_id in opnsense_nodes for node_id in members)
+        if has_opnsense:
+            lan_name = f"cyberange-{slug}-lan-c{cid}"
+            _ensure_planned_network(lan_name, "isolated", f"{slug}:lan:{cid}", used_thirds)
+            for node_id in members:
+                if node_id in opnsense_nodes:
+                    _append_network_assignment(node_networks, node_id, "default")
+                _append_network_assignment(node_networks, node_id, lan_name)
+            continue
+
+        net_name = f"cyberange-{slug}-c{cid}"
+        _ensure_planned_network(net_name, "nat", f"{slug}:c{cid}", used_thirds)
+        for node_id in members:
+            _append_network_assignment(node_networks, node_id, net_name)
+
+    return {node_id: nets for node_id, nets in node_networks.items() if nets}
+
+
 def _reuse_existing_network(net_name: str) -> bool:
     """Best-effort: if a network with `net_name` already exists, ensure it's active/autostart.
 
@@ -366,31 +531,38 @@ class VMRuntimeInfo(BaseModel):
     interfaces: List[VMInterfaceInfo] = []
 
 @router.get("/vms", response_model=List[VMResponse])
-async def get_vms():
+async def get_vms(current_user: AuthenticatedUser = Depends(require_authenticated_user)):
     try:
         creds_cache = _load_creds_cache()
         vms = vm_manager.list_domains()
         for vm in vms:
             vm["credentials"] = creds_cache.get(vm.get("name"))
-        return vms
+        return filter_vms_for_user(vms, current_user)
     except Exception as e:
         logger.exception("Failed to list VMs")
         raise HTTPException(status_code=500, detail="Failed to list VMs")
 
 
 @router.get("/runtime/vms", response_model=List[VMRuntimeInfo])
-async def get_runtime_vms():
+async def get_runtime_vms(current_user: AuthenticatedUser = Depends(require_authenticated_user)):
     try:
         vms = vm_manager.list_domains_with_interfaces()
-        return vms
+        return filter_vms_for_user(vms, current_user)
     except Exception as e:
         logger.exception("Failed to list runtime VMs")
         raise HTTPException(status_code=500, detail="Failed to list runtime VMs")
 
 @router.post("/vms")
-async def create_vm(vm: VMCreateRequest):
+async def create_vm(vm: VMCreateRequest, current_user: AuthenticatedUser = Depends(require_authenticated_user)):
     if not vm.image_path and not vm.iso_path:
         raise HTTPException(status_code=400, detail="Either image_path or iso_path must be provided")
+
+    existing_record = get_vm_record(vm.name)
+    if existing_record and not can_access_vm(vm.name, current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="A virtual machine with this name belongs to another user")
+    existing_domain_names = {existing_vm.get("name") for existing_vm in vm_manager.list_domains()}
+    if vm.name in existing_domain_names and not can_access_vm(vm.name, current_user) and current_user.role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="A virtual machine with this name already exists")
         
     result = vm_manager.create_vm(
         vm.name, 
@@ -412,22 +584,36 @@ async def create_vm(vm: VMCreateRequest):
         with open(CREDS_CACHE_PATH, "w") as f:
             json.dump(creds_cache, f)
         result["credentials"] = creds
+    register_vm(
+        vm.name,
+        current_user,
+        source="manual",
+        metadata={
+            "network_name": vm.network_name or "default",
+            "network_names": vm.network_names or [],
+            "image_path": vm.image_path,
+            "iso_path": vm.iso_path,
+        },
+    )
     return result
 
 @router.post("/vms/{name}/start")
-async def start_vm(name: str):
+async def start_vm(name: str, current_user: AuthenticatedUser = Depends(require_authenticated_user)):
+    _require_vm_access(name, current_user)
     if vm_manager.start_vm(name):
         return {"status": "started"}
     raise HTTPException(status_code=404, detail="VM not found or could not be started")
 
 @router.post("/vms/{name}/stop")
-async def stop_vm(name: str):
+async def stop_vm(name: str, current_user: AuthenticatedUser = Depends(require_authenticated_user)):
+    _require_vm_access(name, current_user)
     if vm_manager.stop_vm(name):
         return {"status": "stopped"}
     raise HTTPException(status_code=404, detail="VM not found or could not be stopped")
 
 @router.delete("/vms/{name}")
-async def delete_vm(name: str):
+async def delete_vm(name: str, current_user: AuthenticatedUser = Depends(require_authenticated_user)):
+    _require_vm_access(name, current_user)
     if vm_manager.delete_vm(name):
         creds_cache = _load_creds_cache()
         if name in creds_cache:
@@ -435,6 +621,7 @@ async def delete_vm(name: str):
             os.makedirs(os.path.dirname(CREDS_CACHE_PATH), exist_ok=True)
             with open(CREDS_CACHE_PATH, "w") as f:
                 json.dump(creds_cache, f)
+            remove_vm(name)
         try:
             vm_manager.cleanup_unused_networks()
         except Exception as e:
@@ -444,18 +631,18 @@ async def delete_vm(name: str):
 
 
 @router.post("/topology/cache")
-async def cache_topology(payload: Dict[str, Any]):
+async def cache_topology(payload: Dict[str, Any], current_user: AuthenticatedUser = Depends(require_authenticated_user)):
     global _TOPOLOGY_CACHE, _TOPOLOGY_CACHE_TS
     _TOPOLOGY_CACHE = payload or {}
     _TOPOLOGY_CACHE_TS = time.time()
-    return {"status": "cached", "updated_at": _TOPOLOGY_CACHE_TS}
+    saved = save_topology_cache_for_user(current_user, payload or {})
+    return {"status": "cached", "updated_at": saved["updated_at"]}
 
 
 @router.get("/topology/cache")
-async def get_cached_topology():
-    if not _TOPOLOGY_CACHE:
-        raise HTTPException(status_code=404, detail="No cached topology")
-    return {"topology": _TOPOLOGY_CACHE, "updated_at": _TOPOLOGY_CACHE_TS}
+async def get_cached_topology(current_user: AuthenticatedUser = Depends(require_authenticated_user)):
+    entry = get_topology_cache_for_user(current_user)
+    return {"topology": (entry or {}).get("topology") or {}, "updated_at": (entry or {}).get("updated_at")}
 
 class TopologyNodeConfig(BaseModel):
     image: str
@@ -479,10 +666,16 @@ class TopologyNode(BaseModel):
     # Optional position for visualization restoration
     position: Optional[Position] = None
 
+class TopologyEdgeConfig(BaseModel):
+    segment: Optional[str] = None
+    mode: str = "nat"
+    vlan_id: Optional[int] = None
+
 class TopologyEdge(BaseModel):
     id: Optional[str] = None
     source: str
     target: str
+    config: Optional[TopologyEdgeConfig] = None
 
 class ScenarioConfig(BaseModel):
     name: str
@@ -525,9 +718,10 @@ class TopologyDeployRequest(BaseModel):
     edges: List[TopologyEdge]
 
 @router.post("/topology/deploy")
-async def deploy_topology(topology: TopologyDeployRequest):
+async def deploy_topology(topology: TopologyDeployRequest, current_user: AuthenticatedUser = Depends(require_authenticated_user)):
     results = []
     creds_cache = _load_creds_cache()
+    deployment_prefix = f"dep{uuid.uuid4().hex[:8]}"
     
     if topology.scenario:
         logger.info(
@@ -537,38 +731,11 @@ async def deploy_topology(topology: TopologyDeployRequest):
             topology.scenario.team
         )
     
-    # Create/ensure networks so edge-connected components can talk.
-    # If a component contains an OPNsense node, we create an isolated LAN network (no DHCP/NAT)
-    # and attach OPNsense with WAN+LAN, while other nodes attach to LAN only.
     slug = _network_slug(topology.scenario, suffix=uuid.uuid4().hex[:8])
-    node_ids = [n.id for n in topology.nodes]
-    comp_map = _connected_components(node_ids, topology.edges)
-    max_comp = max(comp_map.values()) if comp_map else 0
-
-    opnsense_nodes = {n.id for n in topology.nodes if _is_opnsense_node(n)}
-
-    used_thirds = _active_nat_third_octets()
-
-    for cid in range(0, max_comp + 1):
-        members = [nid for nid, cc in comp_map.items() if cc == cid]
-        has_opnsense = any(nid in opnsense_nodes for nid in members)
-
-        if has_opnsense:
-            lan_name = f"cyberange-{slug}-lan-c{cid}"
-            h = hashlib.sha1(lan_name.encode("utf-8")).hexdigest()[:8]
-            bridge = f"cr{h}{cid}"[:15]
-            if not vm_manager.ensure_isolated_network(lan_name, bridge):
-                if not _reuse_existing_network(lan_name):
-                    raise HTTPException(status_code=500, detail=f"Failed to create LAN network {lan_name}")
-        else:
-            net_name = f"cyberange-{slug}-c{cid}"
-            h = hashlib.sha1(net_name.encode("utf-8")).hexdigest()[:8]
-            bridge = f"cr{h}{cid}"[:15]
-            third = _pick_nat_third(f"{slug}-c{cid}", used_thirds)
-            gw = f"192.168.{third}.1"
-            if not vm_manager.ensure_network(net_name, bridge, gw):
-                if not _reuse_existing_network(net_name):
-                    raise HTTPException(status_code=500, detail=f"Failed to create network {net_name}")
+    try:
+        node_networks = _plan_topology_network_assignments(topology, slug)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     for node in topology.nodes:
         cloud_init = build_cloud_init_from_assets(node.config.assets)
@@ -605,24 +772,11 @@ async def deploy_topology(topology: TopologyDeployRequest):
                 continue
         
         try:
-            # Sanitize name
-            safe_name = "".join(c for c in node.label if c.isalnum() or c in ('-', '_')).strip()
-            if not safe_name:
-                safe_name = f"vm_{node.id}"
-
-            cid = comp_map.get(node.id, 0)
-
-            members = [nid for nid, cc in comp_map.items() if cc == cid]
-            has_opnsense = any(nid in opnsense_nodes for nid in members)
-            if has_opnsense:
-                lan_name = f"cyberange-{slug}-lan-c{cid}"
-                nets = ["default", lan_name] if node.id in opnsense_nodes else [lan_name]
-            else:
-                net_name = f"cyberange-{slug}-c{cid}"
-                nets = [net_name]
+            vm_name = _scoped_vm_name(node.label, node.id, deployment_prefix)
+            nets = node_networks.get(node.id) or ["default"]
             
             res = vm_manager.create_vm(
-                name=f"{safe_name}_{node.id}",
+                name=vm_name,
                 memory_mb=node.config.ram,
                 vcpus=node.config.cpu,
                 image_path=None if image_path.lower().endswith(".iso") else image_path,
@@ -632,7 +786,14 @@ async def deploy_topology(topology: TopologyDeployRequest):
             )
             creds = None if image_path.lower().endswith(".iso") else cloud_init_credentials(cloud_init)
             if creds and res.get("status") == "success":
-                creds_cache[f"{safe_name}_{node.id}"] = creds
+                creds_cache[vm_name] = creds
+            if res.get("status") == "success":
+                register_vm(
+                    vm_name,
+                    current_user,
+                    source="topology",
+                    metadata={"scenario_name": topology.scenario.name if topology.scenario else None},
+                )
             results.append({**res, "node": node.label, "credentials": creds})
         except Exception as e:
             results.append({"status": "error", "message": str(e), "node": node.label})
@@ -672,13 +833,16 @@ def _job_to_response(job) -> Dict[str, Any]:
     }
 
 
-async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest):
+async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest, current_user: AuthenticatedUser):
     await update_job(job_id, status="running", started_at=time.time(), message="Starting deployment")
     creds_cache = _load_creds_cache()
+    deployment_prefix = f"dep{''.join(ch for ch in (job_id or '') if ch.isalnum())[:8] or uuid.uuid4().hex[:8]}"
     await update_progress(
         job_id,
         {
             "phase": "downloads",
+            "owner_id": current_user.id,
+            "owner_username": current_user.username,
             "downloads": {},
             "nodes": {n.id: {"label": n.label, "status": "pending"} for n in topology.nodes},
         },
@@ -687,38 +851,8 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest):
     results: List[Dict[str, Any]] = []
 
     try:
-        # Create/ensure networks so edge-connected components can talk.
-        # If a component contains an OPNsense node, we create an isolated LAN network (no DHCP/NAT)
-        # and attach OPNsense with WAN+LAN, while other nodes attach to LAN only.
         slug = _network_slug(topology.scenario, suffix=(job_id.split("-")[0] if job_id else None))
-        node_ids = [n.id for n in topology.nodes]
-        comp_map = _connected_components(node_ids, topology.edges)
-        max_comp = max(comp_map.values()) if comp_map else 0
-
-        opnsense_nodes = {n.id for n in topology.nodes if _is_opnsense_node(n)}
-
-        used_thirds = _active_nat_third_octets()
-        for cid in range(0, max_comp + 1):
-            members = [nid for nid, cc in comp_map.items() if cc == cid]
-            has_opnsense = any(nid in opnsense_nodes for nid in members)
-            if has_opnsense:
-                lan_name = f"cyberange-{slug}-lan-c{cid}"
-                h = hashlib.sha1(lan_name.encode("utf-8")).hexdigest()[:8]
-                bridge = f"cr{h}{cid}"[:15]
-                ok = vm_manager.ensure_isolated_network(lan_name, bridge)
-                if not ok:
-                    if not _reuse_existing_network(lan_name):
-                        raise RuntimeError(f"Failed to create LAN network {lan_name}")
-            else:
-                net_name = f"cyberange-{slug}-c{cid}"
-                h = hashlib.sha1(net_name.encode("utf-8")).hexdigest()[:8]
-                bridge = f"cr{h}{cid}"[:15]
-                third = _pick_nat_third(f"{slug}-c{cid}", used_thirds)
-                gw = f"192.168.{third}.1"
-                ok = vm_manager.ensure_network(net_name, bridge, gw)
-                if not ok:
-                    if not _reuse_existing_network(net_name):
-                        raise RuntimeError(f"Failed to create network {net_name}")
+        node_networks = _plan_topology_network_assignments(topology, slug)
 
         # Pre-ensure any scenario sources referenced by nodes (cached; emits progress)
         sources = topology.scenario.sources if topology.scenario and topology.scenario.sources else {}
@@ -873,23 +1007,11 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest):
                     results.append({"status": "error", "node": node.label, "message": msg})
                     continue
 
-            safe_name = "".join(c for c in node.label if c.isalnum() or c in ('-', '_')).strip()
-            if not safe_name:
-                safe_name = f"vm_{node.id}"
-
-            cid = comp_map.get(node.id, 0)
-
-            members = [nid for nid, cc in comp_map.items() if cc == cid]
-            has_opnsense = any(nid in opnsense_nodes for nid in members)
-            if has_opnsense:
-                lan_name = f"cyberange-{slug}-lan-c{cid}"
-                nets = ["default", lan_name] if node.id in opnsense_nodes else [lan_name]
-            else:
-                net_name = f"cyberange-{slug}-c{cid}"
-                nets = [net_name]
+            vm_name = _scoped_vm_name(node.label, node.id, deployment_prefix)
+            nets = node_networks.get(node.id) or ["default"]
 
             res = vm_manager.create_vm(
-                name=f"{safe_name}_{node.id}",
+                name=vm_name,
                 memory_mb=node.config.ram,
                 vcpus=node.config.cpu,
                 image_path=None if image_path.lower().endswith(".iso") else image_path,
@@ -904,14 +1026,22 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest):
                     await set_progress_path(job_id, f"nodes.{node.id}.vnc_port", res["vnc_port"])
                 creds = cloud_init_credentials(cloud_init)
                 if creds:
-                    creds_cache[f"{safe_name}_{node.id}"] = creds
+                    creds_cache[vm_name] = creds
                     await set_progress_path(job_id, f"nodes.{node.id}.credentials.username", creds["username"])
                     await set_progress_path(job_id, f"nodes.{node.id}.credentials.password", creds["password"])
+
+                register_vm(
+                    vm_name,
+                    current_user,
+                    source="topology",
+                    deployment_id=job_id,
+                    metadata={"scenario_name": topology.scenario.name if topology.scenario else None},
+                )
 
                 if image_path.lower().endswith(".iso") and automation_steps:
                     asyncio.create_task(
                         execute_automation_steps(
-                            vm_name=f"{safe_name}_{node.id}",
+                            vm_name=vm_name,
                             node_id=node.id,
                             steps=automation_steps,
                             send_text=vm_manager.send_text,
@@ -932,14 +1062,13 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest):
             deployments = _load_deployments()
             vm_names = []
             for node in topology.nodes:
-                 safe_name = "".join(c for c in node.label if c.isalnum() or c in ('-', '_')).strip()
-                 if not safe_name:
-                     safe_name = f"vm_{node.id}"
-                 vm_names.append(f"{safe_name}_{node.id}")
+                 vm_names.append(_scoped_vm_name(node.label, node.id, deployment_prefix))
             
             deployments[job_id] = {
                 "id": job_id,
                 "name": topology.scenario.name if topology.scenario and topology.scenario.name else "Custom Deployment",
+                "owner_id": current_user.id,
+                "owner_username": current_user.username,
                 "timestamp": time.time(),
                 "vms": vm_names,
                 "topology": topology.dict()
@@ -961,18 +1090,23 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest):
 
 
 @router.post("/topology/deploy-jobs", response_model=DeployJobStartResponse)
-async def start_deploy_job(topology: TopologyDeployRequest):
-    job = new_job(initial_progress={"phase": "queued"})
+async def start_deploy_job(
+    topology: TopologyDeployRequest,
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
+):
+    job = new_job(initial_progress={"phase": "queued", "owner_id": current_user.id, "owner_username": current_user.username})
     # Start background task
-    asyncio.create_task(_run_deploy_job(job.id, topology))
+    asyncio.create_task(_run_deploy_job(job.id, topology, current_user))
     return {"job_id": job.id}
 
 
 @router.get("/topology/deploy-jobs/{job_id}", response_model=DeployJobStatusResponse)
-async def get_deploy_job(job_id: str):
+async def get_deploy_job(job_id: str, current_user: AuthenticatedUser = Depends(require_authenticated_user)):
     job = await get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    if current_user.role != "admin" and (job.progress or {}).get("owner_id") != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have access to this deployment job")
     return _job_to_response(job)
 
 @router.get("/topology/deploy")

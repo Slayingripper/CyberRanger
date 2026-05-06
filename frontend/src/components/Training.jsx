@@ -6,9 +6,11 @@ import remarkGfm from 'remark-gfm';
 import TrainingEditor from './TrainingEditor';
 import VNCViewer from './VNCViewer';
 import Modal from './Modal';
-import { getApiUrl } from '../lib/api';
+import { buildWebSocketUrl, getApiUrl } from '../lib/api';
+import { useAuth } from '../context/AuthContext';
 
-function Training() {
+function Training({ canManage = false }) {
+    const { token } = useAuth();
   const [trainings, setTrainings] = useState([]);
   const [activeTraining, setActiveTraining] = useState(null);
   const [editingTraining, setEditingTraining] = useState(null);
@@ -30,6 +32,19 @@ function Training() {
     const [messageModal, setMessageModal] = useState({ isOpen: false, title: '', message: '', type: 'info' });
 
   const API_URL = getApiUrl();
+
+    const withRunParams = (config = {}) => {
+        if (!runId) {
+            return config;
+        }
+        return {
+            ...config,
+            params: {
+                ...(config.params || {}),
+                run_id: runId,
+            },
+        };
+    };
 
   useEffect(() => {
     fetchTrainings();
@@ -55,7 +70,7 @@ function Training() {
   const checkVmStatus = async () => {
       if (!activeTraining) return;
       try {
-          const res = await axios.get(`${API_URL}/trainings/${activeTraining.id}/levels/${currentLevelIndex}/status`);
+          const res = await axios.get(`${API_URL}/trainings/${activeTraining.id}/levels/${currentLevelIndex}/status`, withRunParams());
           setVmStatus(res.data);
       } catch (e) {
           console.error("Failed to check VM status", e);
@@ -65,7 +80,7 @@ function Training() {
   const deployEnvironment = async () => {
       setDeploying(true);
       try {
-          const res = await axios.post(`${API_URL}/trainings/${activeTraining.id}/levels/${currentLevelIndex}/deploy`);
+          const res = await axios.post(`${API_URL}/trainings/${activeTraining.id}/levels/${currentLevelIndex}/deploy`, null, withRunParams());
           setVmStatus({ vms: res.data.vms }); // Optimistic update or use response
           // Poll for status update to get ports if not immediately available
           setTimeout(checkVmStatus, 2000);
@@ -82,7 +97,7 @@ function Training() {
 
   const executeDestroyEnvironment = async () => {
       try {
-          await axios.post(`${API_URL}/trainings/${activeTraining.id}/levels/${currentLevelIndex}/destroy`);
+          await axios.post(`${API_URL}/trainings/${activeTraining.id}/levels/${currentLevelIndex}/destroy`, null, withRunParams());
           checkVmStatus();
           setDestroyConfirm(false);
       } catch (e) {
@@ -93,7 +108,7 @@ function Training() {
   const stopTraining = async () => {
       try {
           if (activeTraining?.levels?.[currentLevelIndex]?.topology) {
-              await axios.post(`${API_URL}/trainings/${activeTraining.id}/levels/${currentLevelIndex}/destroy`);
+              await axios.post(`${API_URL}/trainings/${activeTraining.id}/levels/${currentLevelIndex}/destroy`, null, withRunParams());
           }
       } catch (e) {
           console.error('Failed to destroy environment while stopping training', e);
@@ -145,9 +160,7 @@ function Training() {
 
         const connectWs = () => {
             if (cancelled) return;
-            // Derive WS URL from API_URL so it works with any host/port
-            const wsBase = API_URL.replace(/^http/, 'ws').replace(/\/api\/?$/, '');
-            const wsUrl = `${wsBase}/api/ws/training-runs/${runId}`;
+            const wsUrl = buildWebSocketUrl(`/api/ws/training-runs/${runId}`, token);
             const ws = new WebSocket(wsUrl);
             wsRef.current = ws;
             ws.onopen = () => {};
@@ -174,7 +187,7 @@ function Training() {
             try { wsRef.current?.close(); } catch (e) {}
             wsRef.current = null;
         };
-    }, [runId]);
+    }, [runId, token]);
 
   const handleAnswerChange = (taskId, value) => {
     setAnswers({ ...answers, [taskId]: value });
@@ -300,7 +313,7 @@ function Training() {
   const executeSendConsole = async () => {
       if (!consolePrompt.value) return;
       try {
-          const res = await axios.post(`${API_URL}/debug/trainings/${activeTraining.id}/levels/${currentLevelIndex}/console`, { msg: consolePrompt.value });
+          const res = await axios.post(`${API_URL}/debug/trainings/${activeTraining.id}/levels/${currentLevelIndex}/console`, { msg: consolePrompt.value }, withRunParams());
           setConsolePrompt({ ...consolePrompt, isOpen: false });
           const sent = Array.isArray(res.data?.sent_to) ? res.data.sent_to.length : 0;
           setMessageModal({ isOpen: true, title: 'Success', message: `Console text sent to ${sent} VM${sent === 1 ? '' : 's'}.`, type: 'success' });
@@ -409,7 +422,7 @@ function Training() {
                                         {vm.state === 1 && vm.vnc_port && (
                                             <div className="mt-2">
                                                 <VNCViewer 
-                                                    url={`${API_URL.replace(/^http/, 'ws')}/ws/vnc/${vm.vnc_port}`}
+                                                    url={buildWebSocketUrl(`/api/ws/vnc/${vm.vnc_port}`, token)}
                                                     viewOnly={false}
                                                     credentials={vm.credentials}
                                                 />
@@ -499,20 +512,20 @@ function Training() {
                 <div className="flex flex-col items-end">
                     <span className="text-xs uppercase tracking-wider text-secondary font-bold mb-2">{t.difficulty}</span>
                     <div className="flex space-x-2">
-                        <button 
+                        {canManage && <button 
                             onClick={(e) => handleEditTraining(e, t)}
                             className="text-secondary hover:text-primary opacity-0 group-hover:opacity-100 transition-opacity"
                             title="Edit Training"
                         >
                             <Edit size={16} />
-                        </button>
-                        <button 
+                        </button>}
+                        {canManage && <button 
                             onClick={(e) => handleDeleteTraining(e, t.id)}
                             className="text-secondary hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
                             title="Delete Training"
                         >
                             <Trash2 size={16} />
-                        </button>
+                        </button>}
                     </div>
                 </div>
             </div>
@@ -524,17 +537,15 @@ function Training() {
             </div>
         ))}
         
-        {/* Create New Training Card */}
-        <div 
+        {canManage && <div 
             onClick={handleCreateTraining}
             className="bg-surface/50 rounded-xl border border-border border-dashed p-6 flex flex-col items-center justify-center text-secondary hover:text-primary hover:border-secondary cursor-pointer min-h-[200px]"
         >
             <Plus size={48} className="mb-2" />
             <span className="font-medium">Create New Training Module</span>
-        </div>
+        </div>}
 
-        {/* Import Training Card */}
-        <div 
+        {canManage && <div 
             onClick={() => document.getElementById('training-upload').click()}
             className="bg-surface/50 rounded-xl border border-border border-dashed p-6 flex flex-col items-center justify-center text-secondary hover:text-primary hover:border-secondary cursor-pointer min-h-[200px]"
         >
@@ -547,7 +558,7 @@ function Training() {
                 className="hidden" 
                 onChange={handleUploadTraining}
             />
-        </div>
+        </div>}
         </div>
 
         <Modal

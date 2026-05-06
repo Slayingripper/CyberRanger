@@ -11,8 +11,11 @@ A lightweight, No B.S., scalable Cyber Range platform using QEMU/KVM.
 ## Features
 - **Backend**: Python FastAPI with Libvirt integration.
 - **Frontend**: React + Vite with Tailwind CSS.
+- **Authentication**: Local user accounts with admin and user roles.
+- **Custom Network Segments**: Builder connections can define shared segments, NAT or isolated modes, and VLAN IDs for multi-interface deployments.
 - **Console Access**: NoVNC integration for browser-based VM access.
 - **Scenarios**: YAML-based scenario definition.
+- **User Isolation**: Topologies, deployments, training runs, and VM consoles are scoped per user.
 
 ## Prerequisites
 - Linux Host (Ubuntu/Debian recommended)
@@ -69,6 +72,12 @@ A lightweight, No B.S., scalable Cyber Range platform using QEMU/KVM.
 - **Scenarios**: Add new scenarios in the `scenarios/` directory.
 - **Images**: Place images under `./images` (bind-mounted to `/app/images` in the backend). Scenarios can also auto-download images via `scenario.sources`.
 - **Frontend API URL**: `VITE_API_URL` (default: `http://localhost:8001/api`).
+- **Auth State Storage**: persisted under `backend/.state` by default in Docker-based development.
+- **Bootstrap Admin Username**: `CYBERRANGER_ADMIN_USERNAME` (default: `admin`).
+- **Bootstrap Admin Password**: `CYBERRANGER_ADMIN_PASSWORD` (default: `admin123!`).
+- **Self Registration**: `CYBERRANGER_ALLOW_SELF_REGISTRATION=0|1` (default: enabled).
+- **Custom Auth State Path**: `CYBERRANGER_STATE_DIR` to override the default auth and ownership storage directory.
+- **Custom Topology Networking**: click a builder connection to assign a shared segment name, optional VLAN ID, and `nat` or `isolated` mode. Matching segment names create shared multi-interface networks.
 - **Range Mapper**: set `RANGE_MAPPER_ENABLE=1` to allow scans.
 - **Secure Image Downloads**: `scenario.sources` and `/api/images/download` now support optional `sha256`, `archive_sha256`, `min_bytes`, and `extract` metadata. HTTPS is required by default; set `CYBERANGE_ALLOW_HTTP_DOWNLOADS=1` only for trusted internal mirrors.
 - **VM Credentials**: image-backed deployments now generate per-VM credentials by default instead of using the old shared `user/password` fallback. Override only if you intentionally want fixed credentials.
@@ -132,13 +141,13 @@ Comprehensive documentation is available in the [Wiki](docs/wiki/):
 - **WebSocket Errors**: If you see “Unsupported upgrade request,” ensure the backend image was rebuilt after updating dependencies.
 
 ## TODO
-- [ ] Add user authentication and role-based access control.
-- [ ] Implement scenario sharing and export/import functionality.
-- [ ] Fix clipboard sync issues in NoVNC.
-- [ ] Allow custom network configurations (e.g. multiple interfaces, VLANs).
+- [X] Add user authentication and role-based access control.
+- [X] Implement scenario sharing and export/import functionality.
+- [X] Fix clipboard sync issues in NoVNC.
+- [X] Allow custom network configurations (e.g. multiple interfaces, VLANs).
 - [ ] Add llm-based scenario generation and hints via OLLAMA integration.
 - [ ] Dynamic URL linking for ISO assets in scenario definitions.
 - [ ] Feedback on training - wrong answers.
 
 ## Bugs
-- [ ] Only accepts the first answer of each section in a training scenario. Any other answers show error 400 and are not accepted, even if they are correct.
+- [X] Only accepts the first answer of each section in a training scenario. Any other answers show error 400 and are not accepted, even if they are correct.

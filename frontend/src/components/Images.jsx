@@ -6,7 +6,7 @@ import { getApiUrl } from '../lib/api';
 
 const API_URL = getApiUrl();
 
-export default function Images() {
+export default function Images({ canManage = false }) {
   const [images, setImages] = useState([]);
   const [uploadProgress, setUploadProgress] = useState(null);
   const [downloadUrl, setDownloadUrl] = useState('');
@@ -116,7 +116,7 @@ export default function Images() {
 
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+      {canManage && <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* Upload Card */}
         <div className="bg-surface p-6 rounded-xl border border-border">
           <h3 className="text-xl font-bold mb-4 flex items-center gap-2 text-primary">
@@ -223,7 +223,7 @@ export default function Images() {
             </div>
           </div>
         </div>
-      </div>
+      </div>}
 
       {/* Active Downloads */}
       {Object.keys(activeDownloads).length > 0 && (
@@ -275,13 +275,13 @@ export default function Images() {
                 <td className="p-4 text-primary">{(img.size / (1024 * 1024)).toFixed(2)} MB</td>
                 <td className="p-4 text-secondary text-sm font-mono">{img.host_path}</td>
                 <td className="p-4">
-                  <button
+                  {canManage && <button
                     onClick={() => setDeleteConfirm({ isOpen: true, imageName: img.name })}
                     className="text-secondary hover:text-red-400 transition-colors"
                     title="Delete image"
                   >
                     <Trash2 size={16} />
-                  </button>
+                  </button>}
                 </td>
               </tr>
             ))}
@@ -295,7 +295,7 @@ export default function Images() {
       </div>
 
       <Modal
-        isOpen={deleteConfirm.isOpen}
+        isOpen={canManage && deleteConfirm.isOpen}
         onClose={() => setDeleteConfirm({ isOpen: false, imageName: null })}
         title="Delete Image"
         footer={

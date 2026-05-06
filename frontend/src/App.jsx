@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { Play, Square, Plus, Monitor, Settings as SettingsIcon, Network, HardDrive, BookOpen, Loader2 } from 'lucide-react';
+import { Play, Square, Plus, Monitor, Settings as SettingsIcon, Network, HardDrive, BookOpen, Loader2, LogOut, Shield } from 'lucide-react';
 import axios from 'axios';
 import { getApiUrl } from './lib/api';
+import AdminPanel from './components/AdminPanel';
+import AuthScreen from './components/AuthScreen';
 import Images from './components/Images';
 import VNCConsole from './components/VNCConsole';
 import NetworkBuilder from './components/NetworkBuilder';
@@ -9,11 +11,13 @@ import TopologyViewer from './components/TopologyViewer';
 import Settings from './components/Settings';
 import Training from './components/Training';
 import Modal from './components/Modal';
+import { AuthProvider, useAuth } from './context/AuthContext';
 import { ThemeProvider } from './context/ThemeContext';
 
 const API_URL = getApiUrl();
 
 function AppContent() {
+  const { ready, user, logout, isAdmin } = useAuth();
   const [activeTab, setActiveTab] = useState('dashboard');
   const [visitedTabs, setVisitedTabs] = useState(new Set(['dashboard']));
   const [vms, setVms] = useState([]);
@@ -27,6 +31,13 @@ function AppContent() {
   const [deleteConfirm, setDeleteConfirm] = useState({ isOpen: false, vmName: null });
 
   const fetchData = useCallback(async (isManualRefresh = false) => {
+    if (!user) {
+      setVms([]);
+      setDeployments({});
+      setLoading(false);
+      setRefreshing(false);
+      return;
+    }
     if (isManualRefresh) setRefreshing(true);
     try {
       const [vmsRes, depsRes] = await Promise.all([
@@ -41,15 +52,26 @@ function AppContent() {
       setLoading(false);
       if (isManualRefresh) setRefreshing(false);
     }
-  }, []);
+  }, [user]);
 
   fetchDataRef.current = fetchData;
 
   useEffect(() => {
+    if (!user) {
+      setLoading(false);
+      return undefined;
+    }
+    setLoading(true);
     fetchData();
     const interval = setInterval(() => fetchDataRef.current(false), 5000);
     return () => clearInterval(interval);
-  }, [fetchData]);
+  }, [fetchData, user]);
+
+  useEffect(() => {
+    if (!isAdmin && activeTab === 'admin') {
+      setActiveTab('dashboard');
+    }
+  }, [activeTab, isAdmin]);
 
   const handleStartVM = useCallback(async (name) => {
     await axios.post(`${API_URL}/vms/${name}/start`);
@@ -98,6 +120,20 @@ function AppContent() {
     fetchData(true);
   }, [fetchData]);
 
+  if (!ready) {
+    return (
+      <div className="min-h-screen bg-background text-primary flex items-center justify-center">
+        <div className="flex items-center gap-3 text-secondary">
+          <Loader2 className="animate-spin" size={22} /> Loading CyberRanger...
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <AuthScreen />;
+  }
+
   return (
     <div className="flex h-screen font-sans">
       {/* Sidebar */}
@@ -111,14 +147,28 @@ function AppContent() {
           <SidebarItem icon={<HardDrive />} label="Images" active={activeTab === 'images'} onClick={() => switchTab('images')} />
           <SidebarItem icon={<Network />} label="Topology Builder" active={activeTab === 'builder'} onClick={() => switchTab('builder')} />
           <SidebarItem icon={<BookOpen />} label="Training" active={activeTab === 'training'} onClick={() => switchTab('training')} />
+          {isAdmin && <SidebarItem icon={<Shield />} label="Admin" active={activeTab === 'admin'} onClick={() => switchTab('admin')} />}
           <SidebarItem icon={<SettingsIcon />} label="Settings" active={activeTab === 'settings'} onClick={() => switchTab('settings')} />
         </nav>
+        <div className="p-4 border-t border-border space-y-3">
+          <div className="rounded-xl border border-border bg-background/60 p-3">
+            <div className="text-sm font-semibold text-primary truncate">{user.full_name || user.username}</div>
+            <div className="text-xs uppercase tracking-[0.2em] text-secondary mt-1">{user.role}</div>
+          </div>
+          <button onClick={logout} className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-lg bg-surfaceHover hover:bg-surface text-primary">
+            <LogOut size={16} /> Log Out
+          </button>
+        </div>
       </div>
 
       {/* Main Content */}
       <div className="flex-1 overflow-auto bg-background">
-        <header className="bg-surface border-b border-border p-6">
-          <h1 className="text-2xl font-bold capitalize text-primary">{activeTab}</h1>
+        <header className="bg-surface border-b border-border p-6 flex items-center justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold capitalize text-primary">{activeTab}</h1>
+            <div className="text-sm text-secondary mt-1">Scoped to {user.full_name || user.username}</div>
+          </div>
+          {isAdmin && <div className="text-xs uppercase tracking-[0.2em] text-accent border border-accent/40 rounded-full px-3 py-2">Admin Control Enabled</div>}
         </header>
         
         <main className="p-6">
@@ -132,6 +182,7 @@ function AppContent() {
               onStop={handleStopVM} 
               onDelete={handleDeleteVM}
               onRefresh={handleRefresh}
+              canCleanupNetworks={isAdmin}
               onCleanupNetworks={handleCleanupNetworks}
               onCreate={() => setShowCreateModal(true)}
               onOpenConsole={(vm) => setActiveConsole({ host: 'localhost', port: vm.vnc_port, name: vm.name })}
@@ -139,13 +190,16 @@ function AppContent() {
             />
           </div>
           <div style={{ display: activeTab === 'images' ? undefined : 'none' }}>
-            {visitedTabs.has('images') && <Images />}
+            {visitedTabs.has('images') && <Images canManage={isAdmin} />}
           </div>
           <div style={{ display: activeTab === 'builder' ? undefined : 'none' }}>
             {visitedTabs.has('builder') && <NetworkBuilder />}
           </div>
           <div style={{ display: activeTab === 'training' ? undefined : 'none' }}>
-            {visitedTabs.has('training') && <Training />}
+            {visitedTabs.has('training') && <Training canManage={isAdmin} />}
+          </div>
+          <div style={{ display: activeTab === 'admin' ? undefined : 'none' }}>
+            {visitedTabs.has('admin') && isAdmin && <AdminPanel />}
           </div>
           <div style={{ display: activeTab === 'settings' ? undefined : 'none' }}>
             {visitedTabs.has('settings') && <Settings />}
@@ -190,7 +244,9 @@ function AppContent() {
 function App() {
   return (
     <ThemeProvider>
-      <AppContent />
+      <AuthProvider>
+        <AppContent />
+      </AuthProvider>
     </ThemeProvider>
   );
 }
@@ -280,7 +336,7 @@ const VMCard = React.memo(function VMCard({ vm, onStart, onStop, onDelete, onOpe
   );
 });
 
-function Dashboard({ vms, deployments, loading, refreshing, onStart, onStop, onDelete, onRefresh, onCleanupNetworks, onCreate, onOpenConsole, onViewTopology }) {
+function Dashboard({ vms, deployments, loading, refreshing, onStart, onStop, onDelete, onRefresh, onCleanupNetworks, canCleanupNetworks, onCreate, onOpenConsole, onViewTopology }) {
   const groupedVMs = useMemo(() => {
     const groups = {};
     const deployedVMNames = new Set();
@@ -320,7 +376,7 @@ function Dashboard({ vms, deployments, loading, refreshing, onStart, onStop, onD
              <div onClick={onCreate} className="cursor-pointer flex items-center gap-2 bg-accent hover:bg-accentHover text-primary px-4 py-2 rounded text-sm font-medium">
                 <Plus size={16} /> Create New VM
              </div>
-             <button onClick={onCleanupNetworks} className="bg-red-900/40 hover:bg-red-900/60 text-red-200 px-4 py-2 rounded text-sm">Cleanup Networks</button>
+             {canCleanupNetworks && <button onClick={onCleanupNetworks} className="bg-red-900/40 hover:bg-red-900/60 text-red-200 px-4 py-2 rounded text-sm">Cleanup Networks</button>}
              <button onClick={onRefresh} disabled={refreshing} className="bg-surfaceHover hover:opacity-80 text-primary px-4 py-2 rounded text-sm flex items-center gap-2 disabled:opacity-50">
                <Loader2 size={14} className={refreshing ? 'animate-spin' : ''} /> {refreshing ? 'Refreshing...' : 'Refresh'}
              </button>

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import json
@@ -11,6 +11,9 @@ from app.core.image_manager import ensure_image
 from app.core.event_bus import event_bus
 from app.core.provisioning import build_cloud_init_assets, build_cloud_init_from_assets, cloud_init_credentials, ensure_cloud_init_defaults
 import time
+from app.api.training_runs import load_run
+from app.core.auth import AuthenticatedUser, require_admin_user, require_authenticated_user
+from app.core.ownership import register_vm, remove_vm
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -146,8 +149,36 @@ class Training(BaseModel):
     def get_difficulty(self) -> str:
         return self.difficulty or self.level or "medium"
 
+
+def _require_training_run_access(training_id: str, run_id: Optional[str], current_user: AuthenticatedUser):
+    if not run_id:
+        return None
+
+    run = load_run(run_id)
+    if run.definition_id != training_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Training run does not match this training definition")
+    if current_user.role == "admin":
+        return run
+    if run.owner_id == current_user.id or current_user.username in set(run.participants or []):
+        return run
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have access to this training run")
+
+
+def _training_scope_prefix(training_id: str, current_user: AuthenticatedUser, run_id: Optional[str]) -> str:
+    if run_id:
+        compact = "".join(ch for ch in run_id if ch.isalnum())[:12]
+        return f"tr{compact}"
+    compact_user = "".join(ch for ch in current_user.id if ch.isalnum())[:8]
+    compact_training = "".join(ch for ch in training_id if ch.isalnum())[:8]
+    return f"tu{compact_user}_{compact_training}"
+
+
+def _training_vm_name(scope_prefix: str, raw_name: str) -> str:
+    safe_name = "".join(c for c in raw_name if c.isalnum()) or "vm"
+    return f"{scope_prefix}_{safe_name}"
+
 @router.get("/trainings", response_model=List[Training])
-async def list_trainings():
+async def list_trainings(current_user: AuthenticatedUser = Depends(require_authenticated_user)):
     trainings = []
     if not os.path.exists(TRAININGS_DIR):
         return []
@@ -165,7 +196,7 @@ async def list_trainings():
     return trainings
 
 @router.get("/trainings/{training_id}", response_model=Training)
-async def get_training(training_id: str):
+async def get_training(training_id: str, current_user: AuthenticatedUser = Depends(require_authenticated_user)):
     file_path = os.path.join(TRAININGS_DIR, f"{training_id}.json")
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Training not found")
@@ -174,7 +205,7 @@ async def get_training(training_id: str):
         return json.load(file)
 
 @router.post("/trainings", response_model=Training)
-async def create_training(training: Training):
+async def create_training(training: Training, _admin_user: AuthenticatedUser = Depends(require_admin_user)):
     if not training.id:
         training.id = str(uuid.uuid4())
     
@@ -185,7 +216,7 @@ async def create_training(training: Training):
     return training
 
 @router.put("/trainings/{training_id}", response_model=Training)
-async def update_training(training_id: str, training: Training):
+async def update_training(training_id: str, training: Training, _admin_user: AuthenticatedUser = Depends(require_admin_user)):
     file_path = os.path.join(TRAININGS_DIR, f"{training_id}.json")
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Training not found")
@@ -197,18 +228,26 @@ async def update_training(training_id: str, training: Training):
     return training
 
 @router.delete("/trainings/{training_id}")
-async def delete_training(training_id: str):
+async def delete_training(training_id: str, _admin_user: AuthenticatedUser = Depends(require_admin_user)):
     file_path = os.path.join(TRAININGS_DIR, f"{training_id}.json")
     if os.path.exists(file_path):
         os.remove(file_path)
     return {"status": "success"}
 
 @router.post("/trainings/{training_id}/levels/{level_idx}/deploy")
-async def deploy_level(training_id: str, level_idx: int):
+async def deploy_level(
+    training_id: str,
+    level_idx: int,
+    run_id: Optional[str] = Query(default=None),
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
+):
     # Load training manually since we need dict access
     file_path = os.path.join(TRAININGS_DIR, f"{training_id}.json")
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Training not found")
+
+    run = _require_training_run_access(training_id, run_id, current_user)
+    scope_prefix = _training_scope_prefix(training_id, current_user, run_id)
     
     with open(file_path, "r") as file:
         training = json.load(file)
@@ -230,14 +269,13 @@ async def deploy_level(training_id: str, level_idx: int):
     creds_cache = _load_creds_cache()
     
     for vm_conf in vms:
-        # Sanitize name — training-scoped (no level index) so VMs persist across levels
-        safe_name = "".join(c for c in vm_conf.get('name', 'vm') if c.isalnum())
-        name = f"t{training_id[:8]}_{safe_name}"
+        name = _training_vm_name(scope_prefix, vm_conf.get('name', 'vm'))
 
         # If VM already exists, return its info instead of creating a duplicate
         if name in existing_domains:
             existing = existing_domains[name]
             creds = creds_cache.get(name)
+            register_vm(name, current_user, source="training", run_id=run_id, training_id=training_id)
             existing['credentials'] = creds
             results.append({"name": name, "status": "existing", "details": existing, "credentials": creds})
             continue
@@ -272,25 +310,36 @@ async def deploy_level(training_id: str, level_idx: int):
             creds = cloud_init_credentials(cloud_init)
             if creds:
                 creds_cache[name] = creds
+            register_vm(name, current_user, source="training", run_id=run_id, training_id=training_id)
             results.append({"name": name, "status": "created", "details": res, "credentials": creds})
         except Exception as e:
             results.append({"name": name, "status": "error", "error": str(e)})
 
         try:
-            vm_manager.start_console_stream(name, training_id, level_idx)
+            vm_manager.start_console_stream(name, definition_id=training_id, level_idx=level_idx, run_id=run_id)
         except Exception as e:
             logger.warning("Failed to start console stream for %s: %s", name, e)
     _save_creds_cache(creds_cache)
-    # publish event to any matching runs
-    await event_bus.publish_by_definition_level(training_id, level_idx, {"type": "deploy", "ts": time.time(), "result": results})
+    if run_id:
+        await event_bus.publish(run_id, {"type": "deploy", "ts": time.time(), "result": results})
+    else:
+        await event_bus.publish_by_definition_level(training_id, level_idx, {"type": "deploy", "ts": time.time(), "result": results})
 
     return {"status": "deployed", "vms": results}
 
 @router.post("/trainings/{training_id}/levels/{level_idx}/destroy")
-async def destroy_level(training_id: str, level_idx: int):
+async def destroy_level(
+    training_id: str,
+    level_idx: int,
+    run_id: Optional[str] = Query(default=None),
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
+):
     file_path = os.path.join(TRAININGS_DIR, f"{training_id}.json")
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Training not found")
+
+    _require_training_run_access(training_id, run_id, current_user)
+    scope_prefix = _training_scope_prefix(training_id, current_user, run_id)
     
     with open(file_path, "r") as file:
         training = json.load(file)
@@ -308,15 +357,14 @@ async def destroy_level(training_id: str, level_idx: int):
     if not vm_manager.conn:
         vm_manager.connect()
 
-    # Collect VM names from ALL levels so we destroy everything for this training
+    # Collect VM names from ALL levels in this user's run so the environment persists across levels for that run only.
     all_vm_names = set()
     for lvl in training.get('levels', []):
         topo = lvl.get('topology')
         if not topo:
             continue
         for vm_conf in topo.get('vms', []):
-            safe_name = "".join(c for c in vm_conf.get('name', 'vm') if c.isalnum())
-            all_vm_names.add(f"t{training_id[:8]}_{safe_name}")
+            all_vm_names.add(_training_vm_name(scope_prefix, vm_conf.get('name', 'vm')))
 
     results = []
     creds_cache = _load_creds_cache()
@@ -329,6 +377,7 @@ async def destroy_level(training_id: str, level_idx: int):
                 dom.undefine()
                 results.append(name)
                 creds_cache.pop(name, None)
+                remove_vm(name)
                 try:
                     vm_manager.stop_console_stream(name)
                 except Exception as e:
@@ -340,14 +389,25 @@ async def destroy_level(training_id: str, level_idx: int):
         vm_manager.cleanup_unused_networks()
     except Exception as e:
         logger.warning("Failed to cleanup networks after level destroy: %s", e)
-    await event_bus.publish_by_definition_level(training_id, level_idx, {"type": "destroy", "ts": time.time(), "result": results})
+    if run_id:
+        await event_bus.publish(run_id, {"type": "destroy", "ts": time.time(), "result": results})
+    else:
+        await event_bus.publish_by_definition_level(training_id, level_idx, {"type": "destroy", "ts": time.time(), "result": results})
     return {"status": "destroyed", "vms": results}
 
 @router.get("/trainings/{training_id}/levels/{level_idx}/status")
-async def level_status(training_id: str, level_idx: int):
+async def level_status(
+    training_id: str,
+    level_idx: int,
+    run_id: Optional[str] = Query(default=None),
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
+):
     file_path = os.path.join(TRAININGS_DIR, f"{training_id}.json")
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Training not found")
+
+    _require_training_run_access(training_id, run_id, current_user)
+    scope_prefix = _training_scope_prefix(training_id, current_user, run_id)
     
     with open(file_path, "r") as file:
         training = json.load(file)
@@ -368,8 +428,7 @@ async def level_status(training_id: str, level_idx: int):
     creds_cache = _load_creds_cache()
 
     for vm_conf in vms:
-        safe_name = "".join(c for c in vm_conf.get('name', 'vm') if c.isalnum())
-        name = f"t{training_id[:8]}_{safe_name}"
+        name = _training_vm_name(scope_prefix, vm_conf.get('name', 'vm'))
         
         # Retrieve credentials from cache (set at deploy time)
         creds = creds_cache.get(name)
@@ -387,7 +446,7 @@ async def level_status(training_id: str, level_idx: int):
     return {"vms": vm_statuses}
 
 @router.post("/trainings/upload", response_model=Training)
-async def upload_training(file: UploadFile = File(...)):
+async def upload_training(file: UploadFile = File(...), _admin_user: AuthenticatedUser = Depends(require_admin_user)):
     try:
         content = await file.read()
         # Support both JSON and YAML
@@ -413,11 +472,20 @@ async def upload_training(file: UploadFile = File(...)):
 
 
 @router.post("/debug/trainings/{training_id}/levels/{level_idx}/console")
-async def debug_console_event(training_id: str, level_idx: int, payload: Dict[str, Any]):
+async def debug_console_event(
+    training_id: str,
+    level_idx: int,
+    payload: Dict[str, Any],
+    run_id: Optional[str] = Query(default=None),
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
+):
     """Send text to running training VMs and publish matching console events."""
     msg = payload.get("msg") if isinstance(payload, dict) else None
     if not msg:
         raise HTTPException(status_code=400, detail="msg required")
+
+    _require_training_run_access(training_id, run_id, current_user)
+    scope_prefix = _training_scope_prefix(training_id, current_user, run_id)
 
     file_path = os.path.join(TRAININGS_DIR, f"{training_id}.json")
     if not os.path.exists(file_path):
@@ -436,8 +504,7 @@ async def debug_console_event(training_id: str, level_idx: int, payload: Dict[st
 
     sent_to = []
     for vm_conf in vm_defs:
-        safe_name = "".join(c for c in vm_conf.get("name", "vm") if c.isalnum())
-        vm_name = f"t{training_id[:8]}_{safe_name}"
+        vm_name = _training_vm_name(scope_prefix, vm_conf.get("name", "vm"))
         if vm_manager.send_text(vm_name, f"{msg}\n"):
             sent_to.append(vm_name)
 
@@ -446,7 +513,10 @@ async def debug_console_event(training_id: str, level_idx: int, payload: Dict[st
 
     try:
         for vm_name in sent_to:
-            await event_bus.publish_by_definition_level(training_id, level_idx, {"type": "console", "vm": vm_name, "msg": msg, "ts": time.time()})
+            if run_id:
+                await event_bus.publish(run_id, {"type": "console", "vm": vm_name, "msg": msg, "ts": time.time()})
+            else:
+                await event_bus.publish_by_definition_level(training_id, level_idx, {"type": "console", "vm": vm_name, "msg": msg, "ts": time.time()})
         return {"status": "ok", "sent_to": sent_to}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

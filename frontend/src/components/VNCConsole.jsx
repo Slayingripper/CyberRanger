@@ -1,8 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
 import RFB from '@novnc/novnc/core/rfb';
 import { Clipboard, ClipboardCheck, X } from 'lucide-react';
+import { useAuth } from '../context/AuthContext';
+import { buildWebSocketUrl } from '../lib/api';
 
 export default function VNCConsole({ host, port, vmName, onClose }) {
+  const { token } = useAuth();
   const screenRef = useRef(null);
   const [status, setStatus] = useState('Connecting...');
   const rfbRef = useRef(null);
@@ -66,9 +69,7 @@ export default function VNCConsole({ host, port, vmName, onClose }) {
   useEffect(() => {
     if (!screenRef.current) return;
 
-    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const hostname = window.location.hostname;
-    const url = `${protocol}://${hostname}:8001/api/ws/vnc/${port}`;
+    const url = buildWebSocketUrl(`/api/ws/vnc/${port}`, token);
     
     try {
         const rfb = new RFB(screenRef.current, url, { shared: true });
@@ -104,7 +105,7 @@ export default function VNCConsole({ host, port, vmName, onClose }) {
         rfbRef.current.disconnect();
       }
     };
-  }, [host, port]);
+  }, [host, port, token]);
 
   return (
     <div className="fixed inset-0 z-50 bg-black flex flex-col">

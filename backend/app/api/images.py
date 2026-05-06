@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from typing import Any, Dict, List, Optional
 import uuid
@@ -6,6 +6,7 @@ import os
 import aiofiles
 
 from app.core.image_manager import ensure_image, normalize_source_spec
+from app.core.auth import AuthenticatedUser, require_admin_user, require_authenticated_user
 
 router = APIRouter()
 
@@ -55,7 +56,7 @@ class DownloadStatus(BaseModel):
     error: Optional[str] = None
 
 @router.get("/images", response_model=List[ImageResponse])
-async def list_images():
+async def list_images(current_user: AuthenticatedUser = Depends(require_authenticated_user)):
     images = []
     if not os.path.exists(IMAGES_DIR):
         return []
@@ -72,7 +73,7 @@ async def list_images():
     return images
 
 @router.post("/images/upload")
-async def upload_image(file: UploadFile = File(...)):
+async def upload_image(file: UploadFile = File(...), _admin_user: AuthenticatedUser = Depends(require_admin_user)):
     safe_name = os.path.basename(file.filename or "")
     if not safe_name:
         raise HTTPException(status_code=400, detail="A filename is required")
@@ -124,14 +125,18 @@ async def download_file_task(request_data: Dict[str, Any], task_id: str):
         download_tasks[task_id]["error"] = str(e)
 
 @router.post("/images/download")
-async def download_image(request: DownloadRequest, background_tasks: BackgroundTasks):
+async def download_image(
+    request: DownloadRequest,
+    background_tasks: BackgroundTasks,
+    _admin_user: AuthenticatedUser = Depends(require_admin_user),
+):
     task_id = str(uuid.uuid4())
     payload = request.model_dump(exclude_none=True)
     background_tasks.add_task(download_file_task, payload, task_id)
     return {"status": "download_started", "filename": request.filename or os.path.basename(request.url), "task_id": task_id}
 
 @router.delete("/images/{image_name}")
-async def delete_image(image_name: str):
+async def delete_image(image_name: str, _admin_user: AuthenticatedUser = Depends(require_admin_user)):
     safe_name = os.path.basename(image_name)
     if not safe_name or safe_name in (".", ".."):
         raise HTTPException(status_code=400, detail="Invalid image name")
@@ -142,7 +147,7 @@ async def delete_image(image_name: str):
     return {"status": "deleted", "name": safe_name}
 
 @router.get("/images/download/{task_id}", response_model=DownloadStatus)
-async def get_download_status(task_id: str):
+async def get_download_status(task_id: str, _admin_user: AuthenticatedUser = Depends(require_admin_user)):
     if task_id not in download_tasks:
         raise HTTPException(status_code=404, detail="Task not found")
     

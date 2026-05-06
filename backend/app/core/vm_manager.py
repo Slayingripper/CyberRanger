@@ -402,7 +402,13 @@ class VMManager:
                         return {"status": "error", "message": str(e)}
                 return {"status": "error", "message": "Unknown error"}
 
-    def start_console_stream(self, vm_name: str, definition_id: str, level_idx: int):
+    def start_console_stream(
+        self,
+        vm_name: str,
+        definition_id: Optional[str] = None,
+        level_idx: Optional[int] = None,
+        run_id: Optional[str] = None,
+    ):
         """Start background thread that reads the domain's console and publishes events via event_bus."""
         if vm_name in self.console_threads:
             return
@@ -436,13 +442,16 @@ class VMManager:
                                 txt = data.decode('utf-8', errors='replace')
                             except Exception:
                                 txt = repr(data)
-                            # publish to any runs matching this definition and level
+                            # publish to the owning run when available, otherwise use the legacy definition-level broadcast
                             asyncio_loop = None
                             try:
                                 import asyncio
                                 asyncio_loop = asyncio.new_event_loop()
                                 asyncio.set_event_loop(asyncio_loop)
-                                asyncio_loop.run_until_complete(event_bus.publish_by_definition_level(definition_id, level_idx, {"type": "console", "vm": vm_name, "msg": txt, "ts": time.time()}))
+                                if run_id:
+                                    asyncio_loop.run_until_complete(event_bus.publish(run_id, {"type": "console", "vm": vm_name, "msg": txt, "ts": time.time()}))
+                                elif definition_id is not None and level_idx is not None:
+                                    asyncio_loop.run_until_complete(event_bus.publish_by_definition_level(definition_id, level_idx, {"type": "console", "vm": vm_name, "msg": txt, "ts": time.time()}))
                             finally:
                                 if asyncio_loop:
                                     try:

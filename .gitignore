@@ -15,3 +15,18 @@ backend/training_runs/
 backend/deployments.json
 backend/topology_cache.json
 backend/data/vm_credentials.json
+backend/data/training_runs/
+backend/data/trainings/
+backend/data/users.json
+
+# Local generated training drafts
+backend/trainings/????????-????-????-????-????????????.json
+
+
+.state/
+backend/.state/
+.venv/
+venv/
+backend/.venv-requirements.txt
+*.log
+*.env

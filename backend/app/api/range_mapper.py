@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from app.core.range_mapper import (
@@ -17,6 +17,7 @@ from app.core.range_mapper import (
     scanning_enabled,
     validate_target,
 )
+from app.core.auth import AuthenticatedUser, require_authenticated_user
 
 router = APIRouter()
 
@@ -47,7 +48,7 @@ class RangeParseRequest(BaseModel):
 
 
 @router.post("/range-mapper/scan")
-async def scan_and_convert(req: RangeScanRequest) -> Dict[str, Any]:
+async def scan_and_convert(req: RangeScanRequest, current_user: AuthenticatedUser = Depends(require_authenticated_user)) -> Dict[str, Any]:
     try:
         validate_target(req.target, allow_public=req.allow_public)
     except ValueError as e:
@@ -114,7 +115,7 @@ async def scan_and_convert(req: RangeScanRequest) -> Dict[str, Any]:
 
 
 @router.post("/range-mapper/parse")
-async def parse_and_convert(req: RangeParseRequest) -> Dict[str, Any]:
+async def parse_and_convert(req: RangeParseRequest, current_user: AuthenticatedUser = Depends(require_authenticated_user)) -> Dict[str, Any]:
     xml_path = Path(req.xml_path)
     if not xml_path.exists():
         raise HTTPException(status_code=404, detail="XML file not found")
@@ -135,7 +136,12 @@ async def parse_and_convert(req: RangeParseRequest) -> Dict[str, Any]:
 
 
 @router.post("/range-mapper/import-xml")
-async def import_xml(file: UploadFile = File(...), scenario_name: str = "Imported Network", network_prefix: Optional[str] = None) -> Dict[str, Any]:
+async def import_xml(
+    file: UploadFile = File(...),
+    scenario_name: str = "Imported Network",
+    network_prefix: Optional[str] = None,
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
+) -> Dict[str, Any]:
     """Upload an Nmap XML file and convert it into a builder topology."""
 
     filename = file.filename or "nmap.xml"
@@ -160,5 +166,5 @@ async def import_xml(file: UploadFile = File(...), scenario_name: str = "Importe
 
 
 @router.get("/range-mapper/profiles")
-async def list_profiles() -> Dict[str, Any]:
+async def list_profiles(current_user: AuthenticatedUser = Depends(require_authenticated_user)) -> Dict[str, Any]:
     return {"profiles": load_device_profiles()}

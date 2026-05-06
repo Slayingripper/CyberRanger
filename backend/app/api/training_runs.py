@@ -1,10 +1,11 @@
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 import os
 import json
 import uuid
 import time
+from app.core.auth import AuthenticatedUser, get_current_user_from_websocket, require_authenticated_user
 from app.core.vm_manager import WORK_DIR
 from app.core.event_bus import event_bus
 
@@ -39,6 +40,8 @@ class RunEvent(BaseModel):
 class TrainingRun(BaseModel):
     id: Optional[str] = None
     definition_id: str
+    owner_id: Optional[str] = None
+    owner_username: Optional[str] = None
     participants: List[str] = []
     current_level: int = 0
     state: str = "running"  # 'running'|'completed'|'stopped'
@@ -117,6 +120,19 @@ def load_training_definition(definition_id: str) -> Dict[str, Any]:
 
 def record_event(run: TrainingRun, event_type: str, **kwargs: Any) -> None:
     run.events.append(RunEvent(type=event_type, **kwargs))
+
+
+def _can_access_run(run: TrainingRun, current_user: AuthenticatedUser) -> bool:
+    if current_user.role == "admin":
+        return True
+    if run.owner_id:
+        return run.owner_id == current_user.id
+    return current_user.username in set(run.participants or [])
+
+
+def _require_run_access(run: TrainingRun, current_user: AuthenticatedUser) -> None:
+    if not _can_access_run(run, current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have access to this training run")
 
 
 def summarize_run(run: TrainingRun, definition: Dict[str, Any]) -> TrainingRunEvaluation:
@@ -198,15 +214,48 @@ def summarize_run(run: TrainingRun, definition: Dict[str, Any]) -> TrainingRunEv
     )
 
 
+@router.get("/training-runs", response_model=List[TrainingRun])
+async def list_runs(
+    user_id: Optional[str] = Query(default=None),
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
+):
+    if user_id and current_user.role != "admin" and user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have access to these training runs")
+
+    runs: List[TrainingRun] = []
+    for filename in os.listdir(RUNS_DIR):
+        if not filename.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(RUNS_DIR, filename), "r") as handle:
+                run = TrainingRun(**json.load(handle))
+            if user_id:
+                if run.owner_id == user_id:
+                    runs.append(run)
+                continue
+            if _can_access_run(run, current_user):
+                runs.append(run)
+        except Exception:
+            continue
+    return sorted(runs, key=lambda item: item.created_at, reverse=True)
+
+
 @router.post("/training-runs", response_model=TrainingRun)
-async def create_run(definition_id: str, participants: Optional[List[str]] = None):
+async def create_run(
+    definition_id: str,
+    participants: Optional[List[str]] = None,
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
+):
     # ensure definition exists
     definition = load_training_definition(definition_id)
+    participant_names = list(dict.fromkeys([*(participants or []), current_user.username]))
 
     run = TrainingRun(
         id=str(uuid.uuid4()),
         definition_id=definition_id,
-        participants=participants or [],
+        owner_id=current_user.id,
+        owner_username=current_user.username,
+        participants=participant_names,
         current_level=0,
         state="running",
         level_states=[LevelState(index=i) for i, _ in enumerate(definition.get("levels", []))],
@@ -225,13 +274,16 @@ async def create_run(definition_id: str, participants: Optional[List[str]] = Non
 
 
 @router.get("/training-runs/{run_id}", response_model=TrainingRun)
-async def get_run(run_id: str):
-    return load_run(run_id)
+async def get_run(run_id: str, current_user: AuthenticatedUser = Depends(require_authenticated_user)):
+    run = load_run(run_id)
+    _require_run_access(run, current_user)
+    return run
 
 
 @router.get("/training-runs/{run_id}/evaluation", response_model=TrainingRunEvaluation)
-async def get_run_evaluation(run_id: str):
+async def get_run_evaluation(run_id: str, current_user: AuthenticatedUser = Depends(require_authenticated_user)):
     run = load_run(run_id)
+    _require_run_access(run, current_user)
     definition = load_training_definition(run.definition_id)
     return summarize_run(run, definition)
 
@@ -242,8 +294,14 @@ class SubmitPayload(BaseModel):
 
 
 @router.post("/training-runs/{run_id}/levels/{level_idx}/submit")
-async def submit_level(run_id: str, level_idx: int, payload: SubmitPayload):
+async def submit_level(
+    run_id: str,
+    level_idx: int,
+    payload: SubmitPayload,
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
+):
     run = load_run(run_id)
+    _require_run_access(run, current_user)
     if run.state != "running":
         raise HTTPException(status_code=400, detail="Run is not active")
 
@@ -346,6 +404,14 @@ async def submit_level(run_id: str, level_idx: int, payload: SubmitPayload):
 
 @router.websocket("/ws/training-runs/{run_id}")
 async def run_events_ws(websocket: WebSocket, run_id: str):
+    try:
+        current_user = get_current_user_from_websocket(websocket)
+        run = load_run(run_id)
+        _require_run_access(run, current_user)
+    except HTTPException as exc:
+        await websocket.close(code=4403 if exc.status_code == status.HTTP_403_FORBIDDEN else 4401)
+        return
+
     await websocket.accept()
     await event_bus.connect(run_id, websocket)
     try:
@@ -362,8 +428,14 @@ async def run_events_ws(websocket: WebSocket, run_id: str):
 
 
 @router.post("/training-runs/{run_id}/levels/{level_idx}/hint")
-async def take_hint(run_id: str, level_idx: int, hint_idx: int = 0):
+async def take_hint(
+    run_id: str,
+    level_idx: int,
+    hint_idx: int = 0,
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
+):
     run = load_run(run_id)
+    _require_run_access(run, current_user)
     if level_idx >= len(run.level_states):
         raise HTTPException(status_code=404, detail="Level not found")
     ls = run.level_states[level_idx]
@@ -376,8 +448,9 @@ async def take_hint(run_id: str, level_idx: int, hint_idx: int = 0):
 
 
 @router.post("/training-runs/{run_id}/stop")
-async def stop_run(run_id: str):
+async def stop_run(run_id: str, current_user: AuthenticatedUser = Depends(require_authenticated_user)):
     run = load_run(run_id)
+    _require_run_access(run, current_user)
     if run.state != "stopped":
         run.state = "stopped"
         run.finished_at = time.time()
