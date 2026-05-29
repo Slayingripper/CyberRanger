@@ -6,6 +6,9 @@ import yaml
 import os
 import uuid
 import logging
+import copy
+from urllib.parse import urlparse
+import httpx
 from app.core.vm_manager import WORK_DIR, vm_manager
 from app.core.image_manager import ensure_image
 from app.core.event_bus import event_bus
@@ -42,7 +45,7 @@ def _save_creds_cache(cache: Dict[str, Dict[str, str]]) -> None:
 IMAGE_ALIASES = {
     "ubuntu-20.04": "focal-server-cloudimg-amd64.img",
     "ubuntu-22.04": "jammy-server-cloudimg-amd64.img",
-    "kali-linux": "kali-linux-2025.4-qemu-amd64.7z",
+    "kali-linux": "kali-linux-2026.1-cloud-genericcloud-amd64.qcow2",
     "debian-12": "debian-12-generic-amd64.qcow2",
     "alpine-edge": "alpine-edge.qcow2",
     "opnsense": "opnsense.img",
@@ -57,31 +60,186 @@ IMAGE_DOWNLOAD_SOURCES = {
         "url": "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img",
         "filename": "jammy-server-cloudimg-amd64.img",
     },
-    "kali-linux-2025.4-qemu-amd64.qcow2": {
-        "url": "https://cdimage.kali.org/kali-2025.1/kali-linux-2025.1-qemu-amd64.7z",
-        "filename": "kali-linux-2025.1-qemu-amd64.7z",
+    "kali-linux-2026.1-cloud-genericcloud-amd64.qcow2": {
+        "url": "https://kali.download/cloud-images/kali-2026.1/kali-linux-2026.1-cloud-genericcloud-amd64.tar.xz",
+        "filename": "kali-linux-2026.1-cloud-genericcloud-amd64.tar.xz",
         "extract": {
-            "type": "7z",
-            "output_filename": "kali-linux-2025.4-qemu-amd64.qcow2",
+            "type": "tar.xz",
+            "output_filename": "kali-linux-2026.1-cloud-genericcloud-amd64.qcow2",
+            "member_glob": "*.qcow2",
         },
     },
     "debian-12-generic-amd64.qcow2": {
         "url": "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2",
         "filename": "debian-12-generic-amd64.qcow2",
     },
-    "OPNsense-qcow2.vga-amd64-24.1.qcow": {
-        "url": "https://mirror.us-phoenix-1.gnupgrade.net/opnsense/releases/24.1/OPNsense-24.1.1-OpenSSL-nano-amd64.img.bz2",
-        "filename": "OPNsense-24.1.1-OpenSSL-nano-amd64.img.bz2",
+    "opnsense.img": {
+        "url": "https://pkg.opnsense.org/releases/26.1.6/OPNsense-26.1.6-vga-amd64.img.bz2",
+        "filename": "OPNsense-26.1.6-vga-amd64.img.bz2",
         "extract": {
             "type": "bz2",
-            "output_filename": "OPNsense.qcow2",
+            "output_filename": "opnsense.img",
         },
     },
 }
 
+LEGACY_SOURCE_HOSTS = {
+    "mirror.us-phoenix-1.gnupgrade.net",
+}
+
+_VERIFIED_SOURCE_URLS: Dict[str, bool] = {}
+
+
+def canonicalize_image_key(image_key: Any) -> str:
+    key = str(image_key or "").strip()
+    lowered = key.lower()
+    if "kali-linux" in lowered and "qemu-amd64" in lowered:
+        return "kali-linux"
+    return key
+
+
+def default_image_download_source(image_key: str) -> Optional[Dict[str, Any]]:
+    key = canonicalize_image_key(image_key)
+    if not key:
+        return None
+
+    candidates = [key, os.path.basename(key)]
+    resolved = _resolve_image_filename(key)
+    if resolved not in candidates:
+        candidates.append(resolved)
+
+    lowered = key.lower()
+    if lowered in {"opnsense", "opnsense.img", "opnsense.qcow2"} and "opnsense.img" not in candidates:
+        candidates.append("opnsense.img")
+
+    for candidate in candidates:
+        source = IMAGE_DOWNLOAD_SOURCES.get(candidate)
+        if source:
+            return copy.deepcopy(source)
+    return None
+
+
+def canonicalize_image_download_source(image_key: str, source: Any) -> Optional[Any]:
+    default_source = default_image_download_source(image_key)
+    if source is None:
+        return default_source
+
+    def _prefer_default_for_kali_qemu(url: str, filename: str = "", output_filename: str = "") -> Optional[Any]:
+        if not default_source:
+            return None
+        default_url = str(default_source.get("url") or "")
+        if "cloud-genericcloud" not in default_url:
+            return None
+        combined = " ".join(part.lower() for part in (url, filename, output_filename) if part)
+        if "qemu-amd64" in combined:
+            return default_source
+        return None
+
+    if isinstance(source, str):
+        value = source.strip()
+        if not value:
+            return default_source
+        hostname = (urlparse(value).hostname or "").strip().lower()
+        if hostname in LEGACY_SOURCE_HOSTS and default_source:
+            return default_source
+        preferred = _prefer_default_for_kali_qemu(value)
+        if preferred is not None:
+            return preferred
+        return value
+
+    if isinstance(source, dict):
+        normalized = {key: value for key, value in dict(source).items() if value is not None}
+        if not normalized:
+            return default_source
+        url = str(normalized.get("url") or "").strip()
+        hostname = (urlparse(url).hostname or "").strip().lower()
+        if hostname in LEGACY_SOURCE_HOSTS and default_source:
+            return default_source
+        extract = normalized.get("extract") if isinstance(normalized.get("extract"), dict) else {}
+        preferred = _prefer_default_for_kali_qemu(
+            url,
+            str(normalized.get("filename") or "").strip(),
+            str(extract.get("output_filename") or "").strip(),
+        )
+        if preferred is not None:
+            return preferred
+        return normalized
+
+    return default_source
+
+
+def _source_url_from_spec(source: Any) -> Optional[str]:
+    if isinstance(source, str):
+        value = source.strip()
+        return value or None
+    if isinstance(source, dict):
+        value = str(source.get("url") or "").strip()
+        return value or None
+    return None
+
+
+def _source_signature(source: Any) -> str:
+    if isinstance(source, dict):
+        return json.dumps(source, sort_keys=True)
+    return str(source or "")
+
+
+async def _source_url_is_reachable(url: str) -> bool:
+    target = str(url or "").strip()
+    if not target:
+        return False
+
+    cached = _VERIFIED_SOURCE_URLS.get(target)
+    if cached is not None:
+        return cached
+
+    ok = False
+    try:
+        timeout = httpx.Timeout(20.0, connect=10.0)
+        async with httpx.AsyncClient(follow_redirects=True, timeout=timeout, headers={"Range": "bytes=0-0"}) as client:
+            async with client.stream("GET", target) as response:
+                ok = response.status_code < 400
+    except httpx.HTTPError:
+        ok = False
+
+    _VERIFIED_SOURCE_URLS[target] = ok
+    return ok
+
+
+async def resolve_verified_image_download_source(image_key: str, source: Any) -> Optional[Any]:
+    candidates: List[Any] = []
+    seen = set()
+    for candidate in (
+        canonicalize_image_download_source(image_key, source),
+        default_image_download_source(image_key),
+    ):
+        if candidate is None:
+            continue
+        signature = _source_signature(candidate)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        candidates.append(candidate)
+
+    if not candidates:
+        return None
+
+    checked_urls: List[str] = []
+    for candidate in candidates:
+        url = _source_url_from_spec(candidate)
+        if not url:
+            return candidate
+        checked_urls.append(url)
+        if await _source_url_is_reachable(url):
+            return candidate
+
+    checked_text = ", ".join(checked_urls) if checked_urls else "none"
+    raise RuntimeError(f"No verified download source found for image '{image_key}'. Checked URLs: {checked_text}")
+
 
 def _resolve_image_filename(image_key: str) -> str:
     """Return the expected local filename for an image alias or raw key."""
+    image_key = canonicalize_image_key(image_key)
     if image_key.endswith(".qcow2") or image_key.endswith(".img") or image_key.endswith(".iso"):
         return image_key
     mapped = IMAGE_ALIASES.get(image_key)
@@ -98,7 +256,7 @@ async def _resolve_training_image_path(image_key: str) -> str:
     if os.path.exists(full_path):
         return full_path
 
-    source = IMAGE_DOWNLOAD_SOURCES.get(filename)
+    source = await resolve_verified_image_download_source(image_key, None)
     if source:
         logger.info("Image %s not found locally, downloading...", filename)
         result = await ensure_image(source)

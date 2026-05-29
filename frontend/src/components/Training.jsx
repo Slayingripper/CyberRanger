@@ -6,6 +6,7 @@ import remarkGfm from 'remark-gfm';
 import TrainingEditor from './TrainingEditor';
 import VNCViewer from './VNCViewer';
 import Modal from './Modal';
+import LiveEventTimeline from './LiveEventTimeline';
 import { buildWebSocketUrl, getApiUrl } from '../lib/api';
 import { useAuth } from '../context/AuthContext';
 
@@ -435,16 +436,7 @@ function Training({ canManage = false }) {
                     </div>
                     )}
 
-                                        {runEvents.length > 0 && (
-                                            <div className="mt-4 bg-background p-4 rounded border border-border">
-                                                <h5 className="font-bold mb-2 text-primary">Live Events</h5>
-                                                <ul className="text-sm text-secondary list-disc list-inside">
-                                                    {runEvents.map((ev, i) => (
-                                                        <li key={i}>{ev.type} — {ev.ts ? new Date(ev.ts * 1000).toLocaleTimeString() : ''}</li>
-                                                    ))}
-                                                </ul>
-                                            </div>
-                                        )}
+                                        <LiveEventTimeline events={runEvents} />
 
                     <div className="space-y-6">
                     {level.tasks.map(task => (

@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { Play, Square, Plus, Monitor, Settings as SettingsIcon, Network, HardDrive, BookOpen, Loader2, LogOut, Shield } from 'lucide-react';
+import { Play, Square, Plus, Monitor, Settings as SettingsIcon, Network, HardDrive, BookOpen, Loader2, LogOut, Shield, Bot } from 'lucide-react';
 import axios from 'axios';
 import { getApiUrl } from './lib/api';
 import AdminPanel from './components/AdminPanel';
 import AuthScreen from './components/AuthScreen';
+import AIScenarios from './components/AIScenarios';
 import Images from './components/Images';
 import VNCConsole from './components/VNCConsole';
 import NetworkBuilder from './components/NetworkBuilder';
@@ -29,6 +30,15 @@ function AppContent() {
   const [activeConsole, setActiveConsole] = useState(null);
   const [topologyToView, setTopologyToView] = useState(null);
   const [deleteConfirm, setDeleteConfirm] = useState({ isOpen: false, vmName: null });
+  const tabTitles = {
+    dashboard: 'Dashboard',
+    images: 'Images',
+    builder: 'Topology Builder',
+    ai: 'AI Scenarios',
+    training: 'Training',
+    admin: 'Admin',
+    settings: 'Settings',
+  };
 
   const fetchData = useCallback(async (isManualRefresh = false) => {
     if (!user) {
@@ -146,6 +156,7 @@ function AppContent() {
           <SidebarItem icon={<Monitor />} label="Dashboard" active={activeTab === 'dashboard'} onClick={() => switchTab('dashboard')} />
           <SidebarItem icon={<HardDrive />} label="Images" active={activeTab === 'images'} onClick={() => switchTab('images')} />
           <SidebarItem icon={<Network />} label="Topology Builder" active={activeTab === 'builder'} onClick={() => switchTab('builder')} />
+          <SidebarItem icon={<Bot />} label="AI Scenarios" active={activeTab === 'ai'} onClick={() => switchTab('ai')} />
           <SidebarItem icon={<BookOpen />} label="Training" active={activeTab === 'training'} onClick={() => switchTab('training')} />
           {isAdmin && <SidebarItem icon={<Shield />} label="Admin" active={activeTab === 'admin'} onClick={() => switchTab('admin')} />}
           <SidebarItem icon={<SettingsIcon />} label="Settings" active={activeTab === 'settings'} onClick={() => switchTab('settings')} />
@@ -165,7 +176,7 @@ function AppContent() {
       <div className="flex-1 overflow-auto bg-background">
         <header className="bg-surface border-b border-border p-6 flex items-center justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-bold capitalize text-primary">{activeTab}</h1>
+            <h1 className="text-2xl font-bold text-primary">{tabTitles[activeTab] || activeTab}</h1>
             <div className="text-sm text-secondary mt-1">Scoped to {user.full_name || user.username}</div>
           </div>
           {isAdmin && <div className="text-xs uppercase tracking-[0.2em] text-accent border border-accent/40 rounded-full px-3 py-2">Admin Control Enabled</div>}
@@ -194,6 +205,9 @@ function AppContent() {
           </div>
           <div style={{ display: activeTab === 'builder' ? undefined : 'none' }}>
             {visitedTabs.has('builder') && <NetworkBuilder />}
+          </div>
+          <div style={{ display: activeTab === 'ai' ? undefined : 'none' }}>
+            {visitedTabs.has('ai') && <AIScenarios onOpenBuilder={() => switchTab('builder')} />}
           </div>
           <div style={{ display: activeTab === 'training' ? undefined : 'none' }}>
             {visitedTabs.has('training') && <Training canManage={isAdmin} />}

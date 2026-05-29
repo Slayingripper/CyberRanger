@@ -400,6 +400,45 @@ const NetworkBuilder = () => {
       })
   });
 
+  const applyImportedTopology = useCallback((topo) => {
+      if (!topo || !Array.isArray(topo.nodes)) {
+          return false;
+      }
+
+      const newNodes = topo.nodes.map(n => ({
+          id: n.id,
+          type: 'custom',
+          position: n.position || { x: 100, y: 100 },
+          data: {
+              label: n.label || 'VM',
+              image: n.config?.image || 'ubuntu-20.04',
+              cpu: n.config?.cpu || 1,
+              ram: n.config?.ram || 1024,
+              assets: n.config?.assets || [],
+              automation: n.config?.automation || null,
+              username: n.config?.username || null,
+              password: n.config?.password || null,
+              meta: n.meta || null,
+          },
+      }));
+
+      const newEdges = (topo.edges || []).map((e, idx) => ({
+          id: e.id || `e${idx}`,
+          source: e.source,
+          target: e.target,
+          config: e.config || null,
+      }));
+
+      setNodes(newNodes);
+      setSelectedNode(null);
+      setSelectedEdge(null);
+      setEdges(hydrateEdges(newEdges));
+      setScenarioConfig({ ...SCENARIO_DEFAULTS, ...(topo.scenario || {}) });
+
+      setTimeout(() => reactFlowInstance?.fitView({ padding: 0.2 }), 50);
+      return true;
+  }, [reactFlowInstance, setEdges, setNodes]);
+
   const handleClearTopology = async () => {
       setNodes([]);
       setEdges([]);
@@ -421,6 +460,18 @@ const NetworkBuilder = () => {
   };
 
   const handleSaveTopology = async () => {
+
+  useEffect(() => {
+      const handleApplyTopology = (event) => {
+          const topo = event?.detail?.topology;
+          if (applyImportedTopology(topo)) {
+              setMessageModal({ isOpen: true, title: 'Loaded', message: 'A generated topology was loaded into the builder.', type: 'success' });
+          }
+      };
+
+      window.addEventListener('cyberranger:apply-topology', handleApplyTopology);
+      return () => window.removeEventListener('cyberranger:apply-topology', handleApplyTopology);
+  }, [applyImportedTopology]);
       const topology = buildTopologyPayload();
       const viewport = reactFlowInstance ? reactFlowInstance.getViewport() : null;
       const cachedTopology = { ...topology, viewport };

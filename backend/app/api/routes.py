@@ -1,11 +1,13 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any, Literal
 from app.core.vm_manager import vm_manager, WORK_DIR
 import os
 import glob
 import json
 import logging
+import ipaddress
+import re
 from app.core.image_manager import ensure_image
 import asyncio
 import time
@@ -13,9 +15,13 @@ import hashlib
 import uuid
 from app.core.deploy_automation import execute_automation_steps, normalize_automation_steps
 from app.core.provisioning import build_cloud_init_from_assets, cloud_init_credentials
+from app.core.remote_execution import run_ssh_command_async
+from app.core.vm_agent import VM_AGENT_DEFAULT_PORT, build_vm_agent_bootstrap_command, call_vm_agent
+from app.api.trainings import canonicalize_image_download_source, canonicalize_image_key, resolve_verified_image_download_source
 
 from app.core.deploy_jobs import new_job, get_job, update_job, update_progress, set_progress_path
-from app.core.auth import AuthenticatedUser, require_admin_user, require_authenticated_user
+from app.core.auth import AuthenticatedUser, get_current_user_from_websocket, require_admin_user, require_authenticated_user
+from app.core.event_bus import event_bus
 from app.core.ownership import (
     can_access_vm,
     filter_vms_for_user,
@@ -109,6 +115,48 @@ def _scoped_vm_name(node_label: str, node_id: str, deployment_prefix: Optional[s
         return f"{deployment_prefix}_{safe_name}_{node_id}"
     return f"{safe_name}_{node_id}"
 
+
+def _deployment_prefix(identifier: Optional[str]) -> str:
+    compact = "".join(ch for ch in str(identifier or "") if ch.isalnum())[:8]
+    return f"dep{compact or uuid.uuid4().hex[:8]}"
+
+
+def _get_deployment_for_user(deployment_id: str, current_user: AuthenticatedUser) -> Dict[str, Any]:
+    deployment = _load_deployments().get(deployment_id)
+    if not isinstance(deployment, dict):
+        raise HTTPException(status_code=404, detail="Deployment not found")
+    if not _deployment_visible_to_user(deployment, current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have access to this deployment")
+    return deployment
+
+
+def _topology_from_deployment_record(deployment: Dict[str, Any]) -> "TopologyDeployRequest":
+    payload = deployment.get("topology")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=500, detail="Deployment record is missing topology data")
+    try:
+        return TopologyDeployRequest(**payload)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Deployment record contains invalid topology data") from exc
+
+
+def _deployment_vm_names_by_node_id(topology: "TopologyDeployRequest", deployment_id: str) -> Dict[str, str]:
+    deployment_prefix = _deployment_prefix(deployment_id)
+    return {
+        node.id: _scoped_vm_name(node.label, node.id, deployment_prefix)
+        for node in topology.nodes
+    }
+
+
+def _normalize_runbook_phases(phases: Optional[List[str]]) -> List[str]:
+    normalized: List[str] = []
+    for raw_phase in phases or ["simulation"]:
+        phase = str(raw_phase or "").strip().lower()
+        if phase not in {"setup", "simulation"} or phase in normalized:
+            continue
+        normalized.append(phase)
+    return normalized or ["simulation"]
+
 @router.get("/topology/cache")
 async def get_topology_cache(current_user: AuthenticatedUser = Depends(require_authenticated_user)):
     entry = get_topology_cache_for_user(current_user)
@@ -122,11 +170,7 @@ async def save_topology_cache(topology: Dict[str, Any], current_user: Authentica
 @router.get("/deployments")
 async def get_deployments(current_user: AuthenticatedUser = Depends(require_authenticated_user)):
     deployments = _load_deployments()
-    try:
-        vm_manager.cleanup_unused_networks()
-    except Exception as e:
-        logger.warning("Failed to cleanup unused networks: %s", e)
-    
+
     try:
         current_vms = {vm['name'] for vm in vm_manager.list_domains()}
     except Exception as e:
@@ -195,6 +239,7 @@ def _host_path_for_container_image(container_image_path: str) -> str:
 
 
 def _resolve_image_path(image_key: str) -> str:
+    image_key = canonicalize_image_key(image_key)
     images_dir = os.path.join(WORK_DIR, "images")
 
     image_map = {
@@ -236,12 +281,14 @@ def _resolve_image_path(image_key: str) -> str:
     if mapped:
         candidate = os.path.join(images_dir, mapped)
         if os.path.exists(candidate):
+            if image_key == "kali-linux":
+                return candidate
             candidates.append(candidate)
 
     # Fallbacks for common variants
     patterns = []
     if image_key == "kali-linux":
-        patterns = ["kali-linux-*-qemu-amd64.7z", "kali-linux-*-qemu-amd64.qcow2", "kali*.qcow2", "kali*.7z"]
+        patterns = ["kali-linux-*-cloud-genericcloud-amd64.qcow2", "kali-linux-*-cloud-genericcloud-amd64.tar.xz"]
     elif image_key == "ubuntu-20.04":
         patterns = ["ubuntu-20.04-server-cloudimg-amd64.img", "focal-server-cloudimg-amd64*.img", "ubuntu*20.04*cloudimg*amd64*.img"]
     elif image_key == "windows-10":
@@ -344,6 +391,26 @@ def _append_network_assignment(node_networks: Dict[str, List[str]], node_id: str
         assigned.append(network_name)
 
 
+def _agent_mesh_enabled(topology: "TopologyDeployRequest") -> bool:
+    scenario = getattr(topology, "scenario", None)
+    if not scenario or not getattr(scenario, "runbook", None):
+        return False
+    configured = getattr(scenario, "agent_mesh", None)
+    if configured is None:
+        return True
+    return bool(configured)
+
+
+def _agent_mesh_network_name(slug: str) -> str:
+    return f"cyberange-{slug}-agent"
+
+
+def _runbook_preferred_networks(topology: "TopologyDeployRequest", slug: str) -> List[str]:
+    if not _agent_mesh_enabled(topology):
+        return []
+    return [_agent_mesh_network_name(slug)]
+
+
 def _ensure_planned_network(network_name: str, mode: str, seed: str, used_thirds: set[int]) -> None:
     bridge_hash = hashlib.sha1(network_name.encode("utf-8")).hexdigest()[:10]
     bridge = f"cr{bridge_hash}"[:15]
@@ -366,6 +433,14 @@ def _plan_topology_network_assignments(topology: "TopologyDeployRequest", slug: 
     explicit_node_ids: set[str] = set()
     explicit_networks: Dict[str, str] = {}
     implicit_edges: List[TopologyEdge] = []
+
+    def _apply_agent_mesh() -> None:
+        if not _agent_mesh_enabled(topology):
+            return
+        mesh_name = _agent_mesh_network_name(slug)
+        _ensure_planned_network(mesh_name, "nat", f"{slug}:agent-mesh", used_thirds)
+        for planned_node in topology.nodes:
+            _append_network_assignment(node_networks, planned_node.id, mesh_name)
 
     for edge in topology.edges:
         if not _edge_has_custom_network(edge):
@@ -405,10 +480,12 @@ def _plan_topology_network_assignments(topology: "TopologyDeployRequest", slug: 
     ]
 
     if not component_node_ids:
+        _apply_agent_mesh()
         return {node_id: nets for node_id, nets in node_networks.items() if nets}
 
     comp_map = _connected_components(component_node_ids, implicit_edges)
     if not comp_map:
+        _apply_agent_mesh()
         return {node_id: nets for node_id, nets in node_networks.items() if nets}
 
     opnsense_nodes = {node.id for node in topology.nodes if _is_opnsense_node(node)}
@@ -429,6 +506,8 @@ def _plan_topology_network_assignments(topology: "TopologyDeployRequest", slug: 
         _ensure_planned_network(net_name, "nat", f"{slug}:c{cid}", used_thirds)
         for node_id in members:
             _append_network_assignment(node_networks, node_id, net_name)
+
+    _apply_agent_mesh()
 
     return {node_id: nets for node_id, nets in node_networks.items() if nets}
 
@@ -677,6 +756,36 @@ class TopologyEdge(BaseModel):
     target: str
     config: Optional[TopologyEdgeConfig] = None
 
+
+class ScenarioRunbookStep(BaseModel):
+    title: str
+    action: str
+    actor: Optional[str] = None
+    target: Optional[str] = None
+    expected_outcome: Optional[str] = None
+    delay_seconds: Optional[float] = None
+    automation: Optional[Dict[str, Any]] = None
+    transport: Optional[str] = None
+    command: Optional[str] = None
+    timeout_seconds: Optional[float] = None
+
+
+class ScenarioVisualization(BaseModel):
+    title: str
+    kind: str = "dashboard"
+    node_id: Optional[str] = None
+    url_hint: Optional[str] = None
+    description: Optional[str] = None
+
+
+class ScenarioRunbook(BaseModel):
+    provisioning_strategy: Optional[str] = None
+    setup_order: List[str] = Field(default_factory=list)
+    setup_steps: List[ScenarioRunbookStep] = Field(default_factory=list)
+    simulation_steps: List[ScenarioRunbookStep] = Field(default_factory=list)
+    visualizations: List[ScenarioVisualization] = Field(default_factory=list)
+    success_criteria: List[str] = Field(default_factory=list)
+
 class ScenarioConfig(BaseModel):
     name: str
     team: str
@@ -691,6 +800,9 @@ class ScenarioConfig(BaseModel):
     #     "kali-linux": {"url": "https://.../kali.iso", "filename": "kali.iso"}
     #   }
     sources: Optional[Dict[str, object]] = None
+    # Attach a shared orchestration mesh for runbook/agent-driven scenarios.
+    agent_mesh: Optional[bool] = None
+    runbook: Optional[ScenarioRunbook] = None
 
 
 def _network_slug(scenario: Optional[ScenarioConfig], suffix: Optional[str]) -> str:
@@ -747,7 +859,9 @@ async def deploy_topology(topology: TopologyDeployRequest, current_user: Authent
         if topology.scenario and topology.scenario.sources:
             # Allow referencing either by the node image key (e.g. 'kali-linux') or by filename
             resolved_guess = _resolve_image_path(node.config.image)
-            source = topology.scenario.sources.get(node.config.image) or topology.scenario.sources.get(os.path.basename(resolved_guess))
+            raw_source = topology.scenario.sources.get(node.config.image) or topology.scenario.sources.get(os.path.basename(resolved_guess))
+            if raw_source is not None:
+                source = await resolve_verified_image_download_source(node.config.image, raw_source)
 
         if source:
             try:
@@ -820,6 +934,20 @@ class DeployJobStatusResponse(BaseModel):
     result: Optional[Dict[str, Any]] = None
 
 
+class RunbookJobRequest(BaseModel):
+    phases: List[Literal["setup", "simulation"]] = Field(default_factory=lambda: ["simulation"])
+    execution_mode: Literal["sequential", "actor_parallel"] = "actor_parallel"
+    agent_mode: Literal["off", "prefer", "require"] = "prefer"
+
+
+class VmAgentTaskRequest(BaseModel):
+    command: str
+    background: bool = False
+    timeout_seconds: Optional[float] = 120.0
+    cwd: Optional[str] = None
+    environment: Optional[Dict[str, str]] = None
+
+
 def _job_to_response(job) -> Dict[str, Any]:
     return {
         "job_id": job.id,
@@ -833,18 +961,1197 @@ def _job_to_response(job) -> Dict[str, Any]:
     }
 
 
+async def _publish_deploy_event(job_id: str, event_type: str, **detail: Any) -> None:
+    await event_bus.publish(
+        job_id,
+        {
+            "type": event_type,
+            "ts": time.time(),
+            "detail": detail,
+        },
+    )
+
+
+def _runbook_step_progress(step: ScenarioRunbookStep, index: int) -> Dict[str, Any]:
+    progress = {
+        "index": index + 1,
+        "title": step.title,
+        "action": step.action,
+        "status": "pending",
+    }
+    if step.actor:
+        progress["actor"] = step.actor
+    if step.target:
+        progress["target"] = step.target
+    if step.expected_outcome:
+        progress["expected_outcome"] = step.expected_outcome
+    if step.delay_seconds is not None:
+        progress["delay_seconds"] = step.delay_seconds
+    if step.automation:
+        progress["automation"] = step.automation
+    if step.transport:
+        progress["transport"] = step.transport
+    if step.command:
+        progress["command"] = step.command
+    if step.timeout_seconds is not None:
+        progress["timeout_seconds"] = step.timeout_seconds
+    return progress
+
+
+def _build_runbook_progress(runbook: Optional[ScenarioRunbook]) -> Dict[str, Any]:
+    if not runbook:
+        return {}
+
+    def _phase_progress(steps: List[ScenarioRunbookStep]) -> Dict[str, Any]:
+        return {
+            "status": "pending" if steps else "skipped",
+            "steps": {str(index): _runbook_step_progress(step, index) for index, step in enumerate(steps)},
+        }
+
+    progress: Dict[str, Any] = {
+        "status": "pending",
+        "current_phase": None,
+        "setup": _phase_progress(runbook.setup_steps),
+        "simulation": _phase_progress(runbook.simulation_steps),
+    }
+    if runbook.provisioning_strategy:
+        progress["provisioning_strategy"] = runbook.provisioning_strategy
+    if runbook.success_criteria:
+        progress["success_criteria"] = list(runbook.success_criteria)
+    if runbook.visualizations:
+        progress["visualizations"] = [item.dict(exclude_none=True) for item in runbook.visualizations]
+    return progress
+
+
+def _resolve_runbook_vm_name(step: ScenarioRunbookStep, vm_names_by_node_id: Dict[str, str]) -> Optional[tuple[str, str]]:
+    for node_id in (step.actor, step.target):
+        if node_id and node_id in vm_names_by_node_id:
+            return node_id, vm_names_by_node_id[node_id]
+    return None
+
+
+def _normalize_runbook_transport(transport: Optional[str]) -> str:
+    normalized = str(transport or "ssh").strip().lower()
+    return normalized or "ssh"
+
+
+def _step_uses_vm_agent(step: ScenarioRunbookStep) -> bool:
+    return bool(step.command) and not step.automation and _normalize_runbook_transport(step.transport) != "console"
+
+
+def _deployment_vm_agents(deployment: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    raw_agents = deployment.get("vm_agents")
+    if not isinstance(raw_agents, dict):
+        return {}
+    return {
+        str(node_id): dict(agent_state)
+        for node_id, agent_state in raw_agents.items()
+        if isinstance(agent_state, dict)
+    }
+
+
+def _load_saved_vm_agent_state(deployment_id: str, node_id: str) -> Dict[str, Any]:
+    deployment = _load_deployments().get(deployment_id)
+    if not isinstance(deployment, dict):
+        return {}
+    return dict(_deployment_vm_agents(deployment).get(node_id) or {})
+
+
+def _save_vm_agent_state(deployment_id: str, node_id: str, state: Dict[str, Any]) -> Dict[str, Any]:
+    deployments = _load_deployments()
+    deployment = deployments.get(deployment_id)
+    if not isinstance(deployment, dict):
+        return dict(state)
+
+    vm_agents = deployment.setdefault("vm_agents", {})
+    if not isinstance(vm_agents, dict):
+        vm_agents = {}
+        deployment["vm_agents"] = vm_agents
+    existing = vm_agents.get(node_id) if isinstance(vm_agents.get(node_id), dict) else {}
+    merged = {**existing, **state}
+    vm_agents[node_id] = merged
+    _save_deployments(deployments)
+    return merged
+
+
+def _collect_runbook_vm_agent_targets(
+    steps: List[ScenarioRunbookStep],
+    vm_names_by_node_id: Dict[str, str],
+) -> Dict[str, str]:
+    targets: Dict[str, str] = {}
+    for step in steps:
+        if not _step_uses_vm_agent(step):
+            continue
+        resolved_target = _resolve_runbook_vm_name(step, vm_names_by_node_id)
+        if not resolved_target:
+            continue
+        node_id, vm_name = resolved_target
+        targets[node_id] = vm_name
+    return targets
+
+
+async def _vm_agent_healthcheck(agent_state: Dict[str, Any], timeout_seconds: float = 5.0) -> Dict[str, Any]:
+    return await call_vm_agent(
+        host=str(agent_state.get("host") or "").strip(),
+        token=str(agent_state.get("token") or "").strip(),
+        port=int(agent_state.get("port") or VM_AGENT_DEFAULT_PORT),
+        path="/health",
+        timeout_seconds=timeout_seconds,
+    )
+
+
+async def _execute_vm_agent_task(
+    *,
+    agent_state: Dict[str, Any],
+    command: str,
+    timeout_seconds: float = 120.0,
+    background: bool = False,
+    cwd: Optional[str] = None,
+    environment: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "command": str(command),
+        "background": bool(background),
+        "timeout_seconds": max(1.0, float(timeout_seconds or 0.0)),
+    }
+    if cwd:
+        payload["cwd"] = str(cwd)
+    if environment:
+        payload["environment"] = {str(key): str(value) for key, value in environment.items()}
+    request_timeout = 10.0 if background else max(5.0, float(payload["timeout_seconds"]) + 5.0)
+    return await call_vm_agent(
+        host=str(agent_state.get("host") or "").strip(),
+        token=str(agent_state.get("token") or "").strip(),
+        port=int(agent_state.get("port") or VM_AGENT_DEFAULT_PORT),
+        method="POST",
+        path="/tasks",
+        payload=payload,
+        timeout_seconds=request_timeout,
+    )
+
+
+async def _get_vm_agent_task(agent_state: Dict[str, Any], task_id: str) -> Dict[str, Any]:
+    return await call_vm_agent(
+        host=str(agent_state.get("host") or "").strip(),
+        token=str(agent_state.get("token") or "").strip(),
+        port=int(agent_state.get("port") or VM_AGENT_DEFAULT_PORT),
+        method="GET",
+        path=f"/tasks/{task_id}",
+        timeout_seconds=10.0,
+    )
+
+
+async def _stop_vm_agent_task(agent_state: Dict[str, Any], task_id: str) -> Dict[str, Any]:
+    return await call_vm_agent(
+        host=str(agent_state.get("host") or "").strip(),
+        token=str(agent_state.get("token") or "").strip(),
+        port=int(agent_state.get("port") or VM_AGENT_DEFAULT_PORT),
+        method="DELETE",
+        path=f"/tasks/{task_id}",
+        timeout_seconds=10.0,
+    )
+
+
+async def _ensure_vm_agent_for_node(
+    *,
+    deployment_id: str,
+    node_id: str,
+    vm_name: str,
+    node_credentials_by_id: Dict[str, Dict[str, str]],
+    preferred_networks: Optional[List[str]],
+    node_ip_cache: Dict[str, str],
+    allow_bootstrap: bool,
+) -> Dict[str, Any]:
+    host = await _resolve_runbook_node_ip(
+        step_title=f"VM agent for {node_id}",
+        node_id=node_id,
+        vm_name=vm_name,
+        node_ip_cache=node_ip_cache,
+        preferred_networks=preferred_networks,
+    )
+    saved_state = _load_saved_vm_agent_state(deployment_id, node_id)
+    token = str(saved_state.get("token") or uuid.uuid4().hex)
+    port = int(saved_state.get("port") or VM_AGENT_DEFAULT_PORT)
+    candidate_state = {
+        **saved_state,
+        "node_id": node_id,
+        "vm_name": vm_name,
+        "host": host,
+        "port": port,
+        "token": token,
+    }
+
+    try:
+        health = await _vm_agent_healthcheck(candidate_state, timeout_seconds=3.0)
+        candidate_state.update({
+            "status": "ready",
+            "last_seen_at": time.time(),
+            "health": health,
+        })
+        return _save_vm_agent_state(deployment_id, node_id, candidate_state)
+    except Exception as exc:
+        if not allow_bootstrap:
+            raise RuntimeError(f"VM agent for node '{node_id}' is unavailable: {exc}") from exc
+
+    credentials = node_credentials_by_id.get(node_id) or {}
+    username = str(credentials.get("username") or "").strip()
+    password = str(credentials.get("password") or "").strip()
+    if not username or not password:
+        raise RuntimeError(f"VM agent for node '{node_id}' requires SSH credentials to bootstrap.")
+
+    bootstrap_result = await run_ssh_command_async(
+        host=host,
+        username=username,
+        password=password,
+        command=build_vm_agent_bootstrap_command(token=token, port=port),
+        timeout_seconds=45.0,
+    )
+    exit_status = int(bootstrap_result.get("exit_status") or 0)
+    if exit_status != 0:
+        stderr_text = str(bootstrap_result.get("stderr") or "").strip()
+        raise RuntimeError(
+            f"VM agent bootstrap failed for node '{node_id}' with exit status {exit_status}: {stderr_text or 'unknown error'}"
+        )
+
+    last_error: Optional[Exception] = None
+    for _attempt in range(10):
+        try:
+            health = await _vm_agent_healthcheck(candidate_state, timeout_seconds=3.0)
+            candidate_state.update({
+                "status": "ready",
+                "last_seen_at": time.time(),
+                "health": health,
+                "bootstrapped_at": time.time(),
+            })
+            return _save_vm_agent_state(deployment_id, node_id, candidate_state)
+        except Exception as exc:
+            last_error = exc
+            await asyncio.sleep(1.0)
+
+    raise RuntimeError(f"VM agent for node '{node_id}' did not become healthy after bootstrap: {last_error}")
+
+
+async def _ensure_runbook_vm_agents(
+    *,
+    job_id: str,
+    deployment_id: str,
+    phase_name: str,
+    steps: List[ScenarioRunbookStep],
+    vm_names_by_node_id: Dict[str, str],
+    node_credentials_by_id: Dict[str, Dict[str, str]],
+    preferred_networks: Optional[List[str]],
+    agent_mode: Literal["off", "prefer", "require"],
+) -> Dict[str, Dict[str, Any]]:
+    if agent_mode == "off":
+        return {}
+
+    targets = _collect_runbook_vm_agent_targets(steps, vm_names_by_node_id)
+    if not targets:
+        return {}
+
+    await set_progress_path(
+        job_id,
+        "runbook.vm_agents",
+        {
+            node_id: {
+                "status": "pending",
+                "vm_name": vm_name,
+            }
+            for node_id, vm_name in targets.items()
+        },
+    )
+
+    agents: Dict[str, Dict[str, Any]] = {}
+    node_ip_cache: Dict[str, str] = {}
+
+    for node_id, vm_name in targets.items():
+        await set_progress_path(job_id, f"runbook.vm_agents.{node_id}.status", "starting")
+        await _publish_deploy_event(
+            job_id,
+            "runbook_vm_agent",
+            phase=phase_name,
+            node_id=node_id,
+            vm_name=vm_name,
+            status="starting",
+            message=f"Starting VM agent for {node_id}.",
+        )
+        try:
+            agent_state = await _ensure_vm_agent_for_node(
+                deployment_id=deployment_id,
+                node_id=node_id,
+                vm_name=vm_name,
+                node_credentials_by_id=node_credentials_by_id,
+                preferred_networks=preferred_networks,
+                node_ip_cache=node_ip_cache,
+                allow_bootstrap=True,
+            )
+            agents[node_id] = agent_state
+            await set_progress_path(job_id, f"runbook.vm_agents.{node_id}", {
+                "status": "ready",
+                "vm_name": vm_name,
+                "host": agent_state.get("host"),
+                "port": agent_state.get("port"),
+                "last_seen_at": agent_state.get("last_seen_at"),
+            })
+            await _publish_deploy_event(
+                job_id,
+                "runbook_vm_agent",
+                phase=phase_name,
+                node_id=node_id,
+                vm_name=vm_name,
+                status="ready",
+                host=agent_state.get("host"),
+                port=agent_state.get("port"),
+                message=f"VM agent ready for {node_id}.",
+            )
+        except Exception as exc:
+            await set_progress_path(job_id, f"runbook.vm_agents.{node_id}.status", "failed")
+            await set_progress_path(job_id, f"runbook.vm_agents.{node_id}.error", str(exc))
+            await _publish_deploy_event(
+                job_id,
+                "runbook_vm_agent",
+                phase=phase_name,
+                node_id=node_id,
+                vm_name=vm_name,
+                status="failed",
+                message=str(exc),
+            )
+            if agent_mode == "require":
+                raise
+
+    return agents
+
+
+def _build_runbook_actor_lanes(
+    steps: List[ScenarioRunbookStep],
+    vm_names_by_node_id: Dict[str, str],
+) -> List[Dict[str, Any]]:
+    lanes_by_identifier: Dict[str, Dict[str, Any]] = {}
+    ordered_lanes: List[Dict[str, Any]] = []
+
+    for index, step in enumerate(steps):
+        resolved_target = _resolve_runbook_vm_name(step, vm_names_by_node_id)
+        lane_identifier = resolved_target[0] if resolved_target else str(step.actor or step.target or "shared")
+
+        lane = lanes_by_identifier.get(lane_identifier)
+        if lane is None:
+            lane = {
+                "key": str(len(ordered_lanes)),
+                "label": lane_identifier,
+                "status": "pending",
+                "step_indexes": [],
+                "steps": [],
+            }
+            if resolved_target:
+                lane["node_id"] = resolved_target[0]
+                lane["vm_name"] = resolved_target[1]
+            if step.actor:
+                lane["actor"] = step.actor
+            if step.target:
+                lane["target"] = step.target
+            lanes_by_identifier[lane_identifier] = lane
+            ordered_lanes.append(lane)
+
+        if step.actor and "actor" not in lane:
+            lane["actor"] = step.actor
+        if step.target and "target" not in lane:
+            lane["target"] = step.target
+
+        lane["step_indexes"].append(index + 1)
+        lane["steps"].append((index, step))
+
+    return ordered_lanes
+
+
+async def _resolve_runbook_node_ip(
+    *,
+    step_title: str,
+    node_id: str,
+    vm_name: str,
+    node_ip_cache: Dict[str, str],
+    preferred_networks: Optional[List[str]] = None,
+) -> str:
+    cached = node_ip_cache.get(node_id)
+    if cached:
+        return cached
+
+    ip_address = None
+    if preferred_networks:
+        try:
+            ip_address = await asyncio.to_thread(
+                vm_manager.wait_for_preferred_ipv4,
+                vm_name,
+                preferred_networks,
+                180.0,
+                5.0,
+            )
+        except Exception:
+            ip_address = None
+    if not ip_address:
+        ip_address = await asyncio.to_thread(vm_manager.wait_for_primary_ipv4, vm_name, 180.0, 5.0)
+    if not ip_address:
+        raise RuntimeError(f"Runbook step '{step_title}' could not resolve an IPv4 address for node '{node_id}'.")
+
+    try:
+        normalized_ip = str(ipaddress.ip_address(str(ip_address).strip()))
+    except ValueError as exc:
+        raise RuntimeError(f"Runbook step '{step_title}' resolved a non-IP host '{ip_address}' for node '{node_id}'.") from exc
+
+    node_ip_cache[node_id] = normalized_ip
+    return normalized_ip
+
+
+def _render_runbook_command(command: str, replacements: Dict[str, str]) -> str:
+    rendered = str(command or "")
+    for token in sorted(replacements, key=len, reverse=True):
+        rendered = re.sub(rf"(?<![A-Za-z0-9_-]){re.escape(token)}(?![A-Za-z0-9_-])", replacements[token], rendered)
+    return rendered
+
+
+async def _execute_runbook_phase(
+    *,
+    job_id: str,
+    phase_name: str,
+    steps: List[ScenarioRunbookStep],
+    vm_names_by_node_id: Dict[str, str],
+    node_credentials_by_id: Dict[str, Dict[str, str]],
+    preferred_networks: Optional[List[str]] = None,
+    execution_mode: Literal["sequential", "actor_parallel"] = "sequential",
+    vm_agents_by_node_id: Optional[Dict[str, Dict[str, Any]]] = None,
+    agent_mode: Literal["off", "prefer", "require"] = "off",
+) -> List[Dict[str, Any]]:
+    node_ip_cache: Dict[str, str] = {}
+    vm_agents_by_node_id = vm_agents_by_node_id or {}
+
+    if not steps:
+        await set_progress_path(job_id, f"runbook.{phase_name}.execution_mode", execution_mode)
+        await set_progress_path(job_id, f"runbook.{phase_name}.status", "skipped")
+        await _publish_deploy_event(job_id, "runbook_phase", phase=phase_name, status="skipped", execution_mode=execution_mode)
+        return []
+
+    await set_progress_path(job_id, "runbook.status", "running")
+    await set_progress_path(job_id, "runbook.current_phase", phase_name)
+    await set_progress_path(job_id, f"runbook.{phase_name}.status", "running")
+    await set_progress_path(job_id, f"runbook.{phase_name}.execution_mode", execution_mode)
+    await _publish_deploy_event(job_id, "runbook_phase", phase=phase_name, status="running", execution_mode=execution_mode)
+
+    async def _execute_step(index: int, step: ScenarioRunbookStep) -> Dict[str, Any]:
+        step_key = str(index)
+        step_path = f"runbook.{phase_name}.steps.{step_key}"
+        started_at = time.time()
+        step_number = index + 1
+        await set_progress_path(job_id, f"{step_path}.status", "running")
+        await set_progress_path(job_id, f"{step_path}.started_at", started_at)
+        await _publish_deploy_event(
+            job_id,
+            "runbook_step",
+            phase=phase_name,
+            step_index=step_number,
+            title=step.title,
+            status="running",
+            actor=step.actor,
+            target=step.target,
+        )
+
+        if step.delay_seconds:
+            await set_progress_path(job_id, f"{step_path}.status", "waiting")
+            await _publish_deploy_event(
+                job_id,
+                "runbook_step",
+                phase=phase_name,
+                step_index=step_number,
+                title=step.title,
+                status="waiting",
+                delay_seconds=float(step.delay_seconds),
+            )
+            await asyncio.sleep(max(0.0, float(step.delay_seconds)))
+            await set_progress_path(job_id, f"{step_path}.status", "running")
+
+        if not step.automation:
+            if step.command:
+                target = _resolve_runbook_vm_name(step, vm_names_by_node_id)
+                if not target:
+                    msg = f"Runbook step '{step.title}' does not target a deployed node."
+                    await set_progress_path(job_id, f"{step_path}.status", "failed")
+                    await set_progress_path(job_id, f"{step_path}.message", msg)
+                    await set_progress_path(job_id, f"{step_path}.finished_at", time.time())
+                    await _publish_deploy_event(
+                        job_id,
+                        "runbook_step",
+                        phase=phase_name,
+                        step_index=step_number,
+                        title=step.title,
+                        status="failed",
+                        message=msg,
+                    )
+                    raise RuntimeError(msg)
+
+                node_id, vm_name = target
+                credentials = node_credentials_by_id.get(node_id) or {}
+                username = str(credentials.get("username") or "").strip()
+                password = str(credentials.get("password") or "").strip()
+                if not username or not password:
+                    msg = f"Runbook step '{step.title}' requires SSH credentials for node '{node_id}'."
+                    await set_progress_path(job_id, f"{step_path}.status", "failed")
+                    await set_progress_path(job_id, f"{step_path}.message", msg)
+                    await set_progress_path(job_id, f"{step_path}.finished_at", time.time())
+                    await _publish_deploy_event(
+                        job_id,
+                        "runbook_step",
+                        phase=phase_name,
+                        step_index=step_number,
+                        title=step.title,
+                        status="failed",
+                        message=msg,
+                        node_id=node_id,
+                    )
+                    raise RuntimeError(msg)
+
+                await set_progress_path(job_id, f"{step_path}.status", "waiting_for_ip")
+                await _publish_deploy_event(
+                    job_id,
+                    "runbook_step",
+                    phase=phase_name,
+                    step_index=step_number,
+                    title=step.title,
+                    status="waiting_for_ip",
+                    node_id=node_id,
+                    vm_name=vm_name,
+                )
+                try:
+                    ip_address = await _resolve_runbook_node_ip(
+                        step_title=step.title,
+                        node_id=node_id,
+                        vm_name=vm_name,
+                        node_ip_cache=node_ip_cache,
+                        preferred_networks=preferred_networks,
+                    )
+                except RuntimeError as exc:
+                    msg = str(exc)
+                    await set_progress_path(job_id, f"{step_path}.status", "failed")
+                    await set_progress_path(job_id, f"{step_path}.message", msg)
+                    await set_progress_path(job_id, f"{step_path}.finished_at", time.time())
+                    await _publish_deploy_event(
+                        job_id,
+                        "runbook_step",
+                        phase=phase_name,
+                        step_index=step_number,
+                        title=step.title,
+                        status="failed",
+                        message=msg,
+                        node_id=node_id,
+                    )
+                    raise RuntimeError(msg) from exc
+
+                command_text = str(step.command or "")
+                command_replacements = {
+                    "actor_ip": ip_address,
+                    node_id: ip_address,
+                    f"{node_id}_ip": ip_address,
+                    f"{node_id.replace('-', '_')}_ip": ip_address,
+                }
+                if step.target and step.target != node_id:
+                    target_vm_name = vm_names_by_node_id.get(step.target)
+                    if target_vm_name:
+                        target_ip = await _resolve_runbook_node_ip(
+                            step_title=step.title,
+                            node_id=step.target,
+                            vm_name=target_vm_name,
+                            node_ip_cache=node_ip_cache,
+                            preferred_networks=preferred_networks,
+                        )
+                        command_replacements.update(
+                            {
+                                "target_ip": target_ip,
+                                step.target: target_ip,
+                                f"{step.target}_ip": target_ip,
+                                f"{step.target.replace('-', '_')}_ip": target_ip,
+                            }
+                        )
+                rendered_command = _render_runbook_command(command_text, command_replacements)
+
+                requested_transport = _normalize_runbook_transport(step.transport)
+                actual_transport = requested_transport
+                remote_host = ip_address
+                command_result: Optional[Dict[str, Any]] = None
+                agent_state = vm_agents_by_node_id.get(node_id)
+                command_timeout = max(1.0, float(step.timeout_seconds or 120.0))
+
+                if agent_state and requested_transport != "console" and (requested_transport == "agent" or agent_mode != "off"):
+                    actual_transport = "agent"
+                    remote_host = str(agent_state.get("host") or ip_address)
+
+                if rendered_command != command_text:
+                    await set_progress_path(job_id, f"{step_path}.resolved_command", rendered_command)
+                await set_progress_path(job_id, f"{step_path}.transport", actual_transport)
+                await set_progress_path(job_id, f"{step_path}.remote_host", remote_host)
+                if actual_transport == "agent" and agent_state is not None:
+                    await set_progress_path(job_id, f"{step_path}.agent_port", int(agent_state.get("port") or VM_AGENT_DEFAULT_PORT))
+
+                await _publish_deploy_event(
+                    job_id,
+                    "runbook_command",
+                    phase=phase_name,
+                    step_index=step_number,
+                    title=step.title,
+                    status="running",
+                    node_id=node_id,
+                    vm_name=vm_name,
+                    host=remote_host,
+                    transport=actual_transport,
+                    command=rendered_command,
+                )
+
+                if actual_transport == "agent" and agent_state is not None:
+                    try:
+                        command_result = await _execute_vm_agent_task(
+                            agent_state=agent_state,
+                            command=rendered_command,
+                            timeout_seconds=command_timeout,
+                            background=False,
+                        )
+                    except Exception as exc:
+                        if requested_transport == "agent" or agent_mode == "require":
+                            msg = f"VM agent execution failed for node '{node_id}' at '{remote_host}': {exc}"
+                            await set_progress_path(job_id, f"{step_path}.status", "failed")
+                            await set_progress_path(job_id, f"{step_path}.message", msg)
+                            await set_progress_path(job_id, f"{step_path}.finished_at", time.time())
+                            await _publish_deploy_event(
+                                job_id,
+                                "runbook_command",
+                                phase=phase_name,
+                                step_index=step_number,
+                                title=step.title,
+                                status="failed",
+                                node_id=node_id,
+                                host=remote_host,
+                                transport=actual_transport,
+                                command=rendered_command,
+                                message=msg,
+                            )
+                            raise RuntimeError(msg) from exc
+
+                        actual_transport = "ssh"
+                        remote_host = ip_address
+                        await set_progress_path(job_id, f"{step_path}.transport", actual_transport)
+                        await set_progress_path(job_id, f"{step_path}.remote_host", remote_host)
+                        await _publish_deploy_event(
+                            job_id,
+                            "runbook_vm_agent",
+                            phase=phase_name,
+                            step_index=step_number,
+                            node_id=node_id,
+                            vm_name=vm_name,
+                            status="fallback",
+                            message=f"VM agent unavailable for {node_id}; falling back to SSH.",
+                        )
+
+                if command_result is None:
+                    try:
+                        command_result = await run_ssh_command_async(
+                            host=ip_address,
+                            username=username,
+                            password=password,
+                            command=rendered_command,
+                            timeout_seconds=command_timeout,
+                        )
+                    except Exception as exc:
+                        msg = f"SSH execution failed for node '{node_id}' at '{ip_address}': {exc}"
+                        await set_progress_path(job_id, f"{step_path}.status", "failed")
+                        await set_progress_path(job_id, f"{step_path}.message", msg)
+                        await set_progress_path(job_id, f"{step_path}.finished_at", time.time())
+                        await _publish_deploy_event(
+                            job_id,
+                            "runbook_command",
+                            phase=phase_name,
+                            step_index=step_number,
+                            title=step.title,
+                            status="failed",
+                            node_id=node_id,
+                            host=ip_address,
+                            transport=actual_transport,
+                            command=rendered_command,
+                            message=msg,
+                        )
+                        raise RuntimeError(msg) from exc
+                stdout_text = str(command_result.get("stdout") or "")
+                if not stdout_text:
+                    stdout_text = str(command_result.get("stdout_tail") or "")
+                stderr_text = str(command_result.get("stderr") or "")
+                if not stderr_text:
+                    stderr_text = str(command_result.get("stderr_tail") or "")
+                exit_status = int(command_result.get("exit_status") or 0)
+                await set_progress_path(job_id, f"{step_path}.command_exit_status", exit_status)
+                if stdout_text:
+                    await set_progress_path(job_id, f"{step_path}.stdout_tail", stdout_text[-500:])
+                if stderr_text:
+                    await set_progress_path(job_id, f"{step_path}.stderr_tail", stderr_text[-500:])
+                await _publish_deploy_event(
+                    job_id,
+                    "runbook_command",
+                    phase=phase_name,
+                    step_index=step_number,
+                    title=step.title,
+                    status="completed" if exit_status == 0 else "failed",
+                    node_id=node_id,
+                    host=remote_host,
+                    transport=actual_transport,
+                    exit_status=exit_status,
+                    stdout_tail=stdout_text[-200:],
+                    stderr_tail=stderr_text[-200:],
+                )
+                if exit_status != 0:
+                    msg = f"{actual_transport.upper()} command for runbook step '{step.title}' failed with exit status {exit_status}."
+                    await set_progress_path(job_id, f"{step_path}.status", "failed")
+                    await set_progress_path(job_id, f"{step_path}.message", msg)
+                    await set_progress_path(job_id, f"{step_path}.finished_at", time.time())
+                    await _publish_deploy_event(
+                        job_id,
+                        "runbook_step",
+                        phase=phase_name,
+                        step_index=step_number,
+                        title=step.title,
+                        status="failed",
+                        message=msg,
+                        node_id=node_id,
+                    )
+                    raise RuntimeError(msg)
+
+                finished_at = time.time()
+                await set_progress_path(job_id, f"{step_path}.status", "completed")
+                await set_progress_path(job_id, f"{step_path}.message", f"Executed over {actual_transport.upper()} on {node_id}.")
+                await set_progress_path(job_id, f"{step_path}.finished_at", finished_at)
+                await _publish_deploy_event(
+                    job_id,
+                    "runbook_step",
+                    phase=phase_name,
+                    step_index=step_number,
+                    title=step.title,
+                    status="completed",
+                    node_id=node_id,
+                    transport=actual_transport,
+                )
+                return {
+                    "title": step.title,
+                    "status": "completed",
+                    "actor": step.actor,
+                    "target": step.target,
+                    "node_id": node_id,
+                    "vm_name": vm_name,
+                    "transport": actual_transport,
+                    "host": remote_host,
+                    "exit_status": exit_status,
+                }
+
+            finished_at = time.time()
+            await set_progress_path(job_id, f"{step_path}.status", "manual")
+            await set_progress_path(job_id, f"{step_path}.message", "No executable automation was provided for this step.")
+            await set_progress_path(job_id, f"{step_path}.finished_at", finished_at)
+            await _publish_deploy_event(
+                job_id,
+                "runbook_step",
+                phase=phase_name,
+                step_index=step_number,
+                title=step.title,
+                status="manual",
+                message="No executable automation was provided for this step.",
+            )
+            return {
+                "title": step.title,
+                "status": "manual",
+                "actor": step.actor,
+                "target": step.target,
+                "message": "No executable automation was provided for this step.",
+            }
+
+        target = _resolve_runbook_vm_name(step, vm_names_by_node_id)
+        if not target:
+            msg = f"Runbook step '{step.title}' does not target a deployed node."
+            await set_progress_path(job_id, f"{step_path}.status", "failed")
+            await set_progress_path(job_id, f"{step_path}.message", msg)
+            await set_progress_path(job_id, f"{step_path}.finished_at", time.time())
+            await _publish_deploy_event(
+                job_id,
+                "runbook_step",
+                phase=phase_name,
+                step_index=step_number,
+                title=step.title,
+                status="failed",
+                message=msg,
+            )
+            raise RuntimeError(msg)
+
+        node_id, vm_name = target
+        try:
+            automation_steps = normalize_automation_steps(step.automation)
+        except ValueError as exc:
+            msg = f"Invalid runbook automation for '{step.title}': {exc}"
+            await set_progress_path(job_id, f"{step_path}.status", "failed")
+            await set_progress_path(job_id, f"{step_path}.message", msg)
+            await set_progress_path(job_id, f"{step_path}.finished_at", time.time())
+            await _publish_deploy_event(
+                job_id,
+                "runbook_step",
+                phase=phase_name,
+                step_index=step_number,
+                title=step.title,
+                status="failed",
+                message=msg,
+            )
+            raise RuntimeError(msg) from exc
+
+        async def _progress_cb(event: Dict[str, Any]):
+            status = event.get("status")
+            if status is not None:
+                await set_progress_path(job_id, f"{step_path}.status", str(status))
+            if "step" in event:
+                await set_progress_path(job_id, f"{step_path}.automation_step", int(event["step"]))
+            if "step_type" in event:
+                await set_progress_path(job_id, f"{step_path}.automation_step_type", str(event["step_type"]))
+            if "delay_seconds" in event:
+                await set_progress_path(job_id, f"{step_path}.automation_delay_seconds", float(event["delay_seconds"]))
+            if "ok" in event:
+                await set_progress_path(job_id, f"{step_path}.last_ok", bool(event["ok"]))
+            if "message" in event:
+                await set_progress_path(job_id, f"{step_path}.message", str(event["message"]))
+            if "key" in event:
+                await set_progress_path(job_id, f"{step_path}.key", str(event["key"]))
+            await _publish_deploy_event(
+                job_id,
+                "runbook_step",
+                phase=phase_name,
+                step_index=step_number,
+                title=step.title,
+                status=str(event.get("status") or "running"),
+                node_id=node_id,
+                step_type=event.get("step_type"),
+                message=event.get("message"),
+                key=event.get("key"),
+            )
+
+        ok = await execute_automation_steps(
+            vm_name=vm_name,
+            node_id=node_id,
+            steps=automation_steps,
+            send_text=vm_manager.send_text,
+            send_key=vm_manager.send_key,
+            progress_cb=_progress_cb,
+        )
+        finished_at = time.time()
+        if not ok:
+            msg = f"Runbook step '{step.title}' failed while executing automation."
+            await set_progress_path(job_id, f"{step_path}.status", "failed")
+            await set_progress_path(job_id, f"{step_path}.message", msg)
+            await set_progress_path(job_id, f"{step_path}.finished_at", finished_at)
+            await _publish_deploy_event(
+                job_id,
+                "runbook_step",
+                phase=phase_name,
+                step_index=step_number,
+                title=step.title,
+                status="failed",
+                message=msg,
+                node_id=node_id,
+            )
+            raise RuntimeError(msg)
+
+        await set_progress_path(job_id, f"{step_path}.status", "completed")
+        await set_progress_path(job_id, f"{step_path}.message", f"Executed on {node_id}.")
+        await set_progress_path(job_id, f"{step_path}.finished_at", finished_at)
+        await _publish_deploy_event(
+            job_id,
+            "runbook_step",
+            phase=phase_name,
+            step_index=step_number,
+            title=step.title,
+            status="completed",
+            node_id=node_id,
+            transport="console",
+        )
+        return {
+            "title": step.title,
+            "status": "completed",
+            "actor": step.actor,
+            "target": step.target,
+            "node_id": node_id,
+            "vm_name": vm_name,
+            "transport": "console",
+        }
+
+    if execution_mode != "actor_parallel":
+        phase_results: List[Dict[str, Any]] = []
+        for index, step in enumerate(steps):
+            phase_results.append(await _execute_step(index, step))
+
+        await set_progress_path(job_id, f"runbook.{phase_name}.status", "completed")
+        await _publish_deploy_event(job_id, "runbook_phase", phase=phase_name, status="completed", execution_mode=execution_mode)
+        return phase_results
+
+    actor_lanes = _build_runbook_actor_lanes(steps, vm_names_by_node_id)
+    await set_progress_path(
+        job_id,
+        f"runbook.{phase_name}.lanes",
+        {
+            lane["key"]: {k: v for k, v in lane.items() if k != "steps"}
+            for lane in actor_lanes
+        },
+    )
+    await set_progress_path(job_id, f"runbook.{phase_name}.lane_count", len(actor_lanes))
+
+    async def _execute_lane(lane: Dict[str, Any]) -> List[tuple[int, Dict[str, Any]]]:
+        lane_path = f"runbook.{phase_name}.lanes.{lane['key']}"
+        started_at = time.time()
+        await set_progress_path(job_id, f"{lane_path}.status", "running")
+        await set_progress_path(job_id, f"{lane_path}.started_at", started_at)
+        await _publish_deploy_event(
+            job_id,
+            "runbook_lane",
+            phase=phase_name,
+            lane_key=lane["key"],
+            lane_label=lane.get("label"),
+            node_id=lane.get("node_id"),
+            actor=lane.get("actor"),
+            target=lane.get("target"),
+            status="running",
+            step_indexes=list(lane.get("step_indexes") or []),
+        )
+
+        lane_results: List[tuple[int, Dict[str, Any]]] = []
+        try:
+            for index, step in lane.get("steps") or []:
+                lane_results.append((index, await _execute_step(index, step)))
+        except Exception as exc:
+            await set_progress_path(job_id, f"{lane_path}.status", "failed")
+            await set_progress_path(job_id, f"{lane_path}.error", str(exc))
+            await set_progress_path(job_id, f"{lane_path}.finished_at", time.time())
+            await _publish_deploy_event(
+                job_id,
+                "runbook_lane",
+                phase=phase_name,
+                lane_key=lane["key"],
+                lane_label=lane.get("label"),
+                node_id=lane.get("node_id"),
+                actor=lane.get("actor"),
+                target=lane.get("target"),
+                status="failed",
+                message=str(exc),
+            )
+            raise
+
+        await set_progress_path(job_id, f"{lane_path}.status", "completed")
+        await set_progress_path(job_id, f"{lane_path}.finished_at", time.time())
+        await _publish_deploy_event(
+            job_id,
+            "runbook_lane",
+            phase=phase_name,
+            lane_key=lane["key"],
+            lane_label=lane.get("label"),
+            node_id=lane.get("node_id"),
+            actor=lane.get("actor"),
+            target=lane.get("target"),
+            status="completed",
+        )
+        return lane_results
+
+    lane_outcomes = await asyncio.gather(*(_execute_lane(lane) for lane in actor_lanes), return_exceptions=True)
+    lane_errors: List[str] = []
+    phase_results_by_index: Dict[int, Dict[str, Any]] = {}
+
+    for lane, outcome in zip(actor_lanes, lane_outcomes):
+        if isinstance(outcome, Exception):
+            lane_errors.append(f"{lane.get('label') or lane['key']}: {outcome}")
+            continue
+        for index, result in outcome:
+            phase_results_by_index[index] = result
+
+    if lane_errors:
+        message = "; ".join(lane_errors)
+        await set_progress_path(job_id, f"runbook.{phase_name}.status", "failed")
+        await _publish_deploy_event(job_id, "runbook_phase", phase=phase_name, status="failed", execution_mode=execution_mode, message=message)
+        raise RuntimeError(f"Runbook phase '{phase_name}' failed in actor lanes: {message}")
+
+    phase_results = [phase_results_by_index[index] for index in sorted(phase_results_by_index)]
+
+    await set_progress_path(job_id, f"runbook.{phase_name}.status", "completed")
+    await _publish_deploy_event(job_id, "runbook_phase", phase=phase_name, status="completed", execution_mode=execution_mode)
+    return phase_results
+
+
+async def _run_runbook_job(
+    job_id: str,
+    deployment_id: str,
+    topology: TopologyDeployRequest,
+    current_user: AuthenticatedUser,
+    phases: List[str],
+    execution_mode: Literal["sequential", "actor_parallel"] = "actor_parallel",
+    agent_mode: Literal["off", "prefer", "require"] = "off",
+):
+    runbook = topology.scenario.runbook if topology.scenario else None
+    if not runbook:
+        await update_job(
+            job_id,
+            status="failed",
+            started_at=time.time(),
+            finished_at=time.time(),
+            message="Deployment does not include a runbook",
+            result={"status": "error", "detail": "Deployment does not include a runbook"},
+        )
+        return
+
+    await update_job(job_id, status="running", started_at=time.time(), message="Starting scenario run")
+    await _publish_deploy_event(job_id, "deploy_status", status="running", phase="runbook", message="Starting scenario run")
+
+    vm_names_by_node_id = _deployment_vm_names_by_node_id(topology, deployment_id)
+    creds_cache = _load_creds_cache()
+    node_credentials_by_id = {
+        node_id: creds_cache.get(vm_name) or {}
+        for node_id, vm_name in vm_names_by_node_id.items()
+    }
+    slug = _network_slug(topology.scenario, suffix=(deployment_id.split("-")[0] if deployment_id else None))
+    preferred_runbook_networks = _runbook_preferred_networks(topology, slug)
+    requested_phases = _normalize_runbook_phases(phases)
+    simulation_execution_mode = execution_mode if "simulation" in requested_phases else "sequential"
+    simulation_vm_agents: Dict[str, Dict[str, Any]] = {}
+
+    await update_progress(
+        job_id,
+        {
+            "phase": "runbook",
+            "job_kind": "runbook",
+            "deployment_id": deployment_id,
+            "owner_id": current_user.id,
+            "owner_username": current_user.username,
+            "nodes": {
+                node.id: {
+                    "label": node.label,
+                    "status": "ready",
+                    "vm_name": vm_names_by_node_id.get(node.id),
+                }
+                for node in topology.nodes
+            },
+            "runbook": _build_runbook_progress(runbook),
+        },
+    )
+    await set_progress_path(job_id, "runbook.agent_mode", agent_mode)
+    await set_progress_path(job_id, "runbook.simulation.execution_mode", simulation_execution_mode)
+
+    if "setup" not in requested_phases:
+        await set_progress_path(job_id, "runbook.setup.status", "skipped")
+    if "simulation" not in requested_phases:
+        await set_progress_path(job_id, "runbook.simulation.status", "skipped")
+
+    setup_results: List[Dict[str, Any]] = []
+    simulation_results: List[Dict[str, Any]] = []
+    runbook_errors: List[Dict[str, Any]] = []
+
+    try:
+        if "setup" in requested_phases:
+            try:
+                setup_results = await _execute_runbook_phase(
+                    job_id=job_id,
+                    phase_name="setup",
+                    steps=list(runbook.setup_steps or []),
+                    vm_names_by_node_id=vm_names_by_node_id,
+                    node_credentials_by_id=node_credentials_by_id,
+                    preferred_networks=preferred_runbook_networks,
+                )
+            except Exception as exc:
+                runbook_errors.append({"phase": "setup", "message": str(exc)})
+                await set_progress_path(job_id, "runbook.setup.error", str(exc))
+                await set_progress_path(job_id, "runbook.setup.status", "failed")
+
+        if "simulation" in requested_phases:
+            if runbook_errors and "setup" in requested_phases:
+                await set_progress_path(job_id, "runbook.simulation.status", "skipped")
+            else:
+                try:
+                    simulation_vm_agents = await _ensure_runbook_vm_agents(
+                        job_id=job_id,
+                        deployment_id=deployment_id,
+                        phase_name="simulation",
+                        steps=list(runbook.simulation_steps or []),
+                        vm_names_by_node_id=vm_names_by_node_id,
+                        node_credentials_by_id=node_credentials_by_id,
+                        preferred_networks=preferred_runbook_networks,
+                        agent_mode=agent_mode,
+                    )
+                    simulation_results = await _execute_runbook_phase(
+                        job_id=job_id,
+                        phase_name="simulation",
+                        steps=list(runbook.simulation_steps or []),
+                        vm_names_by_node_id=vm_names_by_node_id,
+                        node_credentials_by_id=node_credentials_by_id,
+                        preferred_networks=preferred_runbook_networks,
+                        execution_mode=simulation_execution_mode,
+                        vm_agents_by_node_id=simulation_vm_agents,
+                        agent_mode=agent_mode,
+                    )
+                except Exception as exc:
+                    runbook_errors.append({"phase": "simulation", "message": str(exc)})
+                    await set_progress_path(job_id, "runbook.simulation.error", str(exc))
+                    await set_progress_path(job_id, "runbook.simulation.status", "failed")
+
+        runbook_status = "completed_with_errors" if runbook_errors else "completed"
+        final_message = "Scenario run completed with warnings" if runbook_errors else "Scenario run completed"
+        final_result_status = "scenario_run_processed_with_warnings" if runbook_errors else "scenario_run_processed"
+        await set_progress_path(job_id, "runbook.status", runbook_status)
+        await set_progress_path(job_id, "runbook.current_phase", None)
+        await update_progress(job_id, {"phase": "done"})
+        await update_job(
+            job_id,
+            status="completed",
+            finished_at=time.time(),
+            message=final_message,
+            result={
+                "status": final_result_status,
+                "deployment_id": deployment_id,
+                "runbook": {
+                    "status": runbook_status,
+                    "agent_mode": agent_mode,
+                    "vm_agents": simulation_vm_agents,
+                    "simulation_execution_mode": simulation_execution_mode,
+                    "setup_results": setup_results,
+                    "simulation_results": simulation_results,
+                    "errors": runbook_errors,
+                },
+            },
+        )
+        await _publish_deploy_event(
+            job_id,
+            "deploy_status",
+            status="completed_with_warnings" if runbook_errors else "completed",
+            phase="done",
+            message=final_message,
+            deployment_id=deployment_id,
+        )
+    except Exception as exc:
+        await update_job(
+            job_id,
+            status="failed",
+            finished_at=time.time(),
+            message=str(exc),
+            result={"status": "error", "detail": str(exc), "deployment_id": deployment_id},
+        )
+        await _publish_deploy_event(job_id, "deploy_status", status="failed", phase="runbook", message=str(exc), deployment_id=deployment_id)
+
+
 async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest, current_user: AuthenticatedUser):
     await update_job(job_id, status="running", started_at=time.time(), message="Starting deployment")
+    await _publish_deploy_event(job_id, "deploy_status", status="running", phase="downloads", message="Starting deployment")
     creds_cache = _load_creds_cache()
-    deployment_prefix = f"dep{''.join(ch for ch in (job_id or '') if ch.isalnum())[:8] or uuid.uuid4().hex[:8]}"
+    deployment_prefix = _deployment_prefix(job_id)
+    runbook = topology.scenario.runbook if topology.scenario else None
     await update_progress(
         job_id,
         {
             "phase": "downloads",
+            "job_kind": "deploy",
+            "deployment_id": job_id,
             "owner_id": current_user.id,
             "owner_username": current_user.username,
             "downloads": {},
             "nodes": {n.id: {"label": n.label, "status": "pending"} for n in topology.nodes},
+            **({"runbook": _build_runbook_progress(runbook)} if runbook else {}),
         },
     )
 
@@ -853,6 +2160,7 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest, current_
     try:
         slug = _network_slug(topology.scenario, suffix=(job_id.split("-")[0] if job_id else None))
         node_networks = _plan_topology_network_assignments(topology, slug)
+        preferred_runbook_networks = _runbook_preferred_networks(topology, slug)
 
         # Pre-ensure any scenario sources referenced by nodes (cached; emits progress)
         sources = topology.scenario.sources if topology.scenario and topology.scenario.sources else {}
@@ -861,7 +2169,8 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest, current_
         needed_sources: Dict[str, Any] = {}
         for node in topology.nodes:
             guess = _resolve_image_path(node.config.image)
-            src = sources.get(node.config.image) or sources.get(os.path.basename(guess))
+            raw_src = sources.get(node.config.image) or sources.get(os.path.basename(guess))
+            src = await resolve_verified_image_download_source(node.config.image, raw_src) if raw_src is not None else None
             if src:
                 # stable key by intended output name
                 if isinstance(src, dict):
@@ -939,12 +2248,14 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest, current_
         # Ensure sources (sequential to keep progress clean)
         if needed_sources:
             await update_job(job_id, message="Downloading required images")
+            await _publish_deploy_event(job_id, "deploy_status", status="running", phase="downloads", message="Downloading required images")
         for _name, src in needed_sources.items():
             await ensure_image(src, progress_cb=_progress_cb)
 
         # Create VMs
         await update_progress(job_id, {"phase": "vms"})
         await update_job(job_id, message="Creating virtual machines")
+        await _publish_deploy_event(job_id, "deploy_status", status="running", phase="vms", message="Creating virtual machines")
 
         async def _automation_progress(event: Dict[str, Any]):
             node_id = event.get("node_id")
@@ -965,6 +2276,20 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest, current_
                 await set_progress_path(job_id, f"nodes.{node_id}.automation.message", str(event["message"]))
             if "key" in event:
                 await set_progress_path(job_id, f"nodes.{node_id}.automation.key", str(event["key"]))
+            await _publish_deploy_event(
+                job_id,
+                "node_automation",
+                node_id=node_id,
+                status=event.get("status"),
+                step=event.get("step"),
+                step_type=event.get("step_type"),
+                key=event.get("key"),
+                message=event.get("message"),
+            )
+
+        vm_names_by_node_id: Dict[str, str] = {}
+        node_credentials_by_id: Dict[str, Dict[str, str]] = {}
+        node_automation_tasks: List[tuple[str, Any]] = []
 
         for node in topology.nodes:
             await set_progress_path(job_id, f"nodes.{node.id}.status", "creating")
@@ -981,7 +2306,9 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest, current_
             src = None
             if topology.scenario and topology.scenario.sources:
                 guess = _resolve_image_path(node.config.image)
-                src = topology.scenario.sources.get(node.config.image) or topology.scenario.sources.get(os.path.basename(guess))
+                raw_src = topology.scenario.sources.get(node.config.image) or topology.scenario.sources.get(os.path.basename(guess))
+                if raw_src is not None:
+                    src = await resolve_verified_image_download_source(node.config.image, raw_src)
 
             if src:
                 ensured = await ensure_image(src, progress_cb=_progress_cb)
@@ -1009,6 +2336,7 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest, current_
 
             vm_name = _scoped_vm_name(node.label, node.id, deployment_prefix)
             nets = node_networks.get(node.id) or ["default"]
+            vm_names_by_node_id[node.id] = vm_name
 
             res = vm_manager.create_vm(
                 name=vm_name,
@@ -1027,6 +2355,7 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest, current_
                 creds = cloud_init_credentials(cloud_init)
                 if creds:
                     creds_cache[vm_name] = creds
+                    node_credentials_by_id[node.id] = creds
                     await set_progress_path(job_id, f"nodes.{node.id}.credentials.username", creds["username"])
                     await set_progress_path(job_id, f"nodes.{node.id}.credentials.password", creds["password"])
 
@@ -1039,19 +2368,85 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest, current_
                 )
 
                 if image_path.lower().endswith(".iso") and automation_steps:
-                    asyncio.create_task(
-                        execute_automation_steps(
-                            vm_name=vm_name,
-                            node_id=node.id,
-                            steps=automation_steps,
-                            send_text=vm_manager.send_text,
-                            send_key=vm_manager.send_key,
-                            progress_cb=_automation_progress,
+                    node_automation_tasks.append(
+                        (
+                            node.id,
+                            execute_automation_steps(
+                                vm_name=vm_name,
+                                node_id=node.id,
+                                steps=automation_steps,
+                                send_text=vm_manager.send_text,
+                                send_key=vm_manager.send_key,
+                                progress_cb=_automation_progress,
+                            ),
                         )
                     )
             else:
                 await set_progress_path(job_id, f"nodes.{node.id}.status", "error")
                 await set_progress_path(job_id, f"nodes.{node.id}.message", res.get("message") or "failed")
+
+        if node_automation_tasks:
+            await update_progress(job_id, {"phase": "node_automation"})
+            await update_job(job_id, message="Waiting for installer automation")
+            await _publish_deploy_event(job_id, "deploy_status", status="running", phase="node_automation", message="Waiting for installer automation")
+            automation_results = await asyncio.gather(*(task for _node_id, task in node_automation_tasks), return_exceptions=True)
+            for (node_id, _task), outcome in zip(node_automation_tasks, automation_results):
+                if isinstance(outcome, Exception) or outcome is False:
+                    msg = f"Installer automation failed for node '{node_id}'."
+                    await set_progress_path(job_id, f"nodes.{node_id}.status", "error")
+                    await set_progress_path(job_id, f"nodes.{node_id}.message", msg)
+                    await _publish_deploy_event(job_id, "deploy_status", status="failed", phase="node_automation", message=msg, node_id=node_id)
+                    raise RuntimeError(msg) if not isinstance(outcome, Exception) else outcome
+
+        runbook_result: Optional[Dict[str, Any]] = None
+        if runbook:
+            await update_progress(job_id, {"phase": "runbook"})
+            await update_job(job_id, message="Executing scenario runbook")
+            await _publish_deploy_event(job_id, "deploy_status", status="running", phase="runbook", message="Executing scenario runbook")
+            runbook_errors: List[Dict[str, Any]] = []
+            setup_results: List[Dict[str, Any]] = []
+            simulation_results: List[Dict[str, Any]] = []
+
+            try:
+                setup_results = await _execute_runbook_phase(
+                    job_id=job_id,
+                    phase_name="setup",
+                    steps=list(runbook.setup_steps or []),
+                    vm_names_by_node_id=vm_names_by_node_id,
+                    node_credentials_by_id=node_credentials_by_id,
+                    preferred_networks=preferred_runbook_networks,
+                )
+            except Exception as exc:
+                runbook_errors.append({"phase": "setup", "message": str(exc)})
+                await set_progress_path(job_id, "runbook.setup.error", str(exc))
+                await set_progress_path(job_id, "runbook.setup.status", "failed")
+
+            if not runbook_errors:
+                try:
+                    simulation_results = await _execute_runbook_phase(
+                        job_id=job_id,
+                        phase_name="simulation",
+                        steps=list(runbook.simulation_steps or []),
+                        vm_names_by_node_id=vm_names_by_node_id,
+                        node_credentials_by_id=node_credentials_by_id,
+                        preferred_networks=preferred_runbook_networks,
+                    )
+                except Exception as exc:
+                    runbook_errors.append({"phase": "simulation", "message": str(exc)})
+                    await set_progress_path(job_id, "runbook.simulation.error", str(exc))
+                    await set_progress_path(job_id, "runbook.simulation.status", "failed")
+            elif runbook.simulation_steps:
+                await set_progress_path(job_id, "runbook.simulation.status", "skipped")
+
+            runbook_status = "completed_with_errors" if runbook_errors else "completed"
+            await set_progress_path(job_id, "runbook.status", runbook_status)
+            await set_progress_path(job_id, "runbook.current_phase", None)
+            runbook_result = {
+                "status": runbook_status,
+                "setup_results": setup_results,
+                "simulation_results": simulation_results,
+                "errors": runbook_errors,
+            }
 
         os.makedirs(os.path.dirname(CREDS_CACHE_PATH), exist_ok=True)
         with open(CREDS_CACHE_PATH, "w") as f:
@@ -1077,15 +2472,29 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest, current_
         except Exception as e:
             logger.error("Failed to save deployment record: %s", e)
 
+        final_message = "Deployment completed"
+        final_result_status = "deployment_processed"
+        if runbook_result and runbook_result.get("errors"):
+            final_message = "Deployment completed with runbook warnings"
+            final_result_status = "deployment_processed_with_warnings"
+
         await update_job(
             job_id,
             status="completed",
             finished_at=time.time(),
-            message="Deployment completed",
-            result={"status": "deployment_processed", "results": results},
+            message=final_message,
+            result={"status": final_result_status, "results": results, **({"runbook": runbook_result} if runbook_result else {})},
         )
         await update_progress(job_id, {"phase": "done"})
+        await _publish_deploy_event(
+            job_id,
+            "deploy_status",
+            status="completed_with_warnings" if runbook_result and runbook_result.get("errors") else "completed",
+            phase="done",
+            message=final_message,
+        )
     except Exception as e:
+        await _publish_deploy_event(job_id, "deploy_status", status="failed", phase=(await get_job(job_id)).progress.get("phase") if await get_job(job_id) else None, message=str(e))
         await update_job(job_id, status="failed", finished_at=time.time(), message=str(e), result={"status": "error", "detail": str(e), "results": results})
 
 
@@ -1100,6 +2509,176 @@ async def start_deploy_job(
     return {"job_id": job.id}
 
 
+@router.post("/deployments/{deployment_id}/runbook-jobs", response_model=DeployJobStartResponse)
+async def start_runbook_job(
+    deployment_id: str,
+    request: RunbookJobRequest,
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
+):
+    deployment = _get_deployment_for_user(deployment_id, current_user)
+    topology = _topology_from_deployment_record(deployment)
+    if not topology.scenario or not topology.scenario.runbook:
+        raise HTTPException(status_code=400, detail="Deployment does not include a runbook")
+
+    job = new_job(
+        initial_progress={
+            "phase": "queued",
+            "job_kind": "runbook",
+            "deployment_id": deployment_id,
+            "owner_id": current_user.id,
+            "owner_username": current_user.username,
+        }
+    )
+    asyncio.create_task(
+        _run_runbook_job(
+            job.id,
+            deployment_id,
+            topology,
+            current_user,
+            list(request.phases or ["simulation"]),
+            request.execution_mode,
+            request.agent_mode,
+        )
+    )
+    return {"job_id": job.id}
+
+
+async def _resolve_vm_agent_for_api(
+    *,
+    deployment_id: str,
+    node_id: str,
+    topology: TopologyDeployRequest,
+    allow_bootstrap: bool,
+) -> Dict[str, Any]:
+    vm_names_by_node_id = _deployment_vm_names_by_node_id(topology, deployment_id)
+    vm_name = vm_names_by_node_id.get(node_id)
+    if not vm_name:
+        raise HTTPException(status_code=404, detail="Node not found in deployment")
+
+    creds_cache = _load_creds_cache()
+    node_credentials_by_id = {
+        candidate_node_id: creds_cache.get(candidate_vm_name) or {}
+        for candidate_node_id, candidate_vm_name in vm_names_by_node_id.items()
+    }
+    slug = _network_slug(topology.scenario, suffix=(deployment_id.split("-")[0] if deployment_id else None))
+    preferred_networks = _runbook_preferred_networks(topology, slug)
+
+    try:
+        return await _ensure_vm_agent_for_node(
+            deployment_id=deployment_id,
+            node_id=node_id,
+            vm_name=vm_name,
+            node_credentials_by_id=node_credentials_by_id,
+            preferred_networks=preferred_networks,
+            node_ip_cache={},
+            allow_bootstrap=allow_bootstrap,
+        )
+    except RuntimeError as exc:
+        status_code = 503 if not allow_bootstrap else 500
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+
+@router.get("/deployments/{deployment_id}/vm-agents")
+async def list_deployment_vm_agents(
+    deployment_id: str,
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
+):
+    deployment = _get_deployment_for_user(deployment_id, current_user)
+    return {"agents": _deployment_vm_agents(deployment)}
+
+
+@router.post("/deployments/{deployment_id}/vm-agents/{node_id}/tasks")
+async def start_vm_agent_task(
+    deployment_id: str,
+    node_id: str,
+    request: VmAgentTaskRequest,
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
+):
+    deployment = _get_deployment_for_user(deployment_id, current_user)
+    topology = _topology_from_deployment_record(deployment)
+    agent_state = await _resolve_vm_agent_for_api(
+        deployment_id=deployment_id,
+        node_id=node_id,
+        topology=topology,
+        allow_bootstrap=True,
+    )
+    try:
+        result = await _execute_vm_agent_task(
+            agent_state=agent_state,
+            command=request.command,
+            timeout_seconds=max(1.0, float(request.timeout_seconds or 0.0)),
+            background=request.background,
+            cwd=request.cwd,
+            environment=request.environment,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"VM agent task failed: {exc}") from exc
+
+    return {
+        "deployment_id": deployment_id,
+        "node_id": node_id,
+        "agent": {
+            "host": agent_state.get("host"),
+            "port": agent_state.get("port"),
+        },
+        "task": result,
+    }
+
+
+@router.get("/deployments/{deployment_id}/vm-agents/{node_id}/tasks/{task_id}")
+async def get_vm_agent_task_status(
+    deployment_id: str,
+    node_id: str,
+    task_id: str,
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
+):
+    deployment = _get_deployment_for_user(deployment_id, current_user)
+    topology = _topology_from_deployment_record(deployment)
+    agent_state = await _resolve_vm_agent_for_api(
+        deployment_id=deployment_id,
+        node_id=node_id,
+        topology=topology,
+        allow_bootstrap=False,
+    )
+    try:
+        task = await _get_vm_agent_task(agent_state, task_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read VM agent task: {exc}") from exc
+
+    return {
+        "deployment_id": deployment_id,
+        "node_id": node_id,
+        "task": task,
+    }
+
+
+@router.delete("/deployments/{deployment_id}/vm-agents/{node_id}/tasks/{task_id}")
+async def stop_vm_agent_task(
+    deployment_id: str,
+    node_id: str,
+    task_id: str,
+    current_user: AuthenticatedUser = Depends(require_authenticated_user),
+):
+    deployment = _get_deployment_for_user(deployment_id, current_user)
+    topology = _topology_from_deployment_record(deployment)
+    agent_state = await _resolve_vm_agent_for_api(
+        deployment_id=deployment_id,
+        node_id=node_id,
+        topology=topology,
+        allow_bootstrap=False,
+    )
+    try:
+        task = await _stop_vm_agent_task(agent_state, task_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to stop VM agent task: {exc}") from exc
+
+    return {
+        "deployment_id": deployment_id,
+        "node_id": node_id,
+        "task": task,
+    }
+
+
 @router.get("/topology/deploy-jobs/{job_id}", response_model=DeployJobStatusResponse)
 async def get_deploy_job(job_id: str, current_user: AuthenticatedUser = Depends(require_authenticated_user)):
     job = await get_job(job_id)
@@ -1108,6 +2687,33 @@ async def get_deploy_job(job_id: str, current_user: AuthenticatedUser = Depends(
     if current_user.role != "admin" and (job.progress or {}).get("owner_id") != current_user.id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have access to this deployment job")
     return _job_to_response(job)
+
+
+@router.websocket("/ws/deploy-jobs/{job_id}")
+async def deploy_job_events_ws(websocket: WebSocket, job_id: str):
+    try:
+        current_user = get_current_user_from_websocket(websocket)
+        job = await get_job(job_id)
+        if not job:
+            await websocket.close(code=4404)
+            return
+        if current_user.role != "admin" and (job.progress or {}).get("owner_id") != current_user.id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have access to this deployment job")
+    except HTTPException as exc:
+        await websocket.close(code=4403 if exc.status_code == status.HTTP_403_FORBIDDEN else 4401)
+        return
+
+    await websocket.accept()
+    await event_bus.connect(job_id, websocket)
+    try:
+        while True:
+            msg = await websocket.receive_text()
+            if msg == "ping":
+                await websocket.send_text("pong")
+    except WebSocketDisconnect:
+        await event_bus.disconnect(job_id, websocket)
+    except Exception:
+        await event_bus.disconnect(job_id, websocket)
 
 @router.get("/topology/deploy")
 async def deploy_topology_get():

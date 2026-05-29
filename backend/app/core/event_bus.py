@@ -3,9 +3,12 @@ import json
 import os
 from typing import Dict, Set
 from fastapi import WebSocket
-# Avoid circular import: compute WORK_DIR relative to project root instead of importing vm_manager
-ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-WORK_DIR = ROOT_DIR
+
+if os.path.exists("/app"):
+    WORK_DIR = "/app"
+else:
+    BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+    WORK_DIR = os.path.join(BASE_DIR, "data")
 
 
 class EventBus:

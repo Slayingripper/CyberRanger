@@ -6,6 +6,7 @@ import subprocess
 import bz2
 import gzip
 import hashlib
+import tarfile
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, Callable
 from urllib.parse import urlparse
@@ -96,7 +97,7 @@ def normalize_source_spec(source: Any) -> Dict[str, Any]:
         if not isinstance(extract, dict):
             raise ValueError("extract must be an object")
         extract_type = str(extract.get("type") or "").strip().lower()
-        if extract_type not in {"7z", "bz2", "gz"}:
+        if extract_type not in {"7z", "bz2", "gz", "tar.xz"}:
             raise ValueError(f"unsupported extract type: {extract_type}")
         output_filename = _safe_filename(str(extract.get("output_filename") or "").strip()) or None
         normalized["extract"] = {
@@ -470,6 +471,90 @@ async def ensure_image(source: Any, progress_cb: Optional[Callable[[Dict[str, An
                             if not chunk:
                                 break
                             fout.write(chunk)
+                    os.replace(tmp_out, final_path)
+                    if progress_cb:
+                        progress_cb(
+                            {
+                                "type": "extract_complete",
+                                "filename": filename,
+                                "final_name": final_name,
+                                "final_bytes": os.path.getsize(final_path) if os.path.exists(final_path) else 0,
+                            }
+                        )
+                except Exception:
+                    try:
+                        if os.path.exists(tmp_out):
+                            os.remove(tmp_out)
+                    finally:
+                        raise
+
+                if remove_archive:
+                    try:
+                        os.remove(archive_path)
+                    except OSError:
+                        pass
+
+                if os.path.getsize(final_path) < required_final_bytes:
+                    raise RuntimeError(
+                        f"extracted file is smaller than expected: {final_name} ({os.path.getsize(final_path)} bytes < {required_final_bytes} bytes)"
+                    )
+                if not _file_matches_sha256(final_path, final_sha256):
+                    raise RuntimeError(f"extracted file checksum mismatch for {final_name}")
+
+                return EnsureResult(filename=final_name, container_path=final_path)
+
+            if extract_type == "tar.xz":
+                import fnmatch
+
+                if os.path.exists(final_path) and os.path.getsize(final_path) >= required_final_bytes and _file_matches_sha256(final_path, final_sha256):
+                    return EnsureResult(filename=final_name, container_path=final_path)
+
+                if not os.path.exists(archive_path) or os.path.getsize(archive_path) < required_archive_bytes:
+                    raise RuntimeError("archive missing or smaller than expected; cannot extract")
+                if not _file_matches_sha256(archive_path, archive_sha256):
+                    raise RuntimeError(f"archive checksum mismatch for {filename}")
+
+                if progress_cb:
+                    progress_cb(
+                        {
+                            "type": "extract_start",
+                            "filename": filename,
+                            "final_name": final_name,
+                            "archive_path": archive_path,
+                        }
+                    )
+
+                fd2, tmp_out = tempfile.mkstemp(prefix=f".{final_name}.", dir=images_dir)
+                os.close(fd2)
+                try:
+                    chosen_member = None
+                    with tarfile.open(archive_path, mode="r:xz") as archive:
+                        for member in archive.getmembers():
+                            if not member.isfile():
+                                continue
+                            member_name = os.path.basename(member.name)
+                            if extract_member_glob:
+                                if fnmatch.fnmatch(member_name, extract_member_glob):
+                                    chosen_member = member
+                                    break
+                            elif member_name.lower().endswith((".qcow2", ".img")):
+                                chosen_member = member
+                                break
+
+                        if chosen_member is None:
+                            raise ValueError("extract failed: no matching file found in archive")
+
+                        extracted = archive.extractfile(chosen_member)
+                        if extracted is None:
+                            raise ValueError("extract failed: selected archive member could not be opened")
+
+                        with extracted, open(tmp_out, "wb") as fout:
+                            while True:
+                                chunk = extracted.read(1024 * 1024)
+                                if not chunk:
+                                    break
+                                fout.write(chunk)
+
                     os.replace(tmp_out, final_path)
                     if progress_cb:
                         progress_cb(

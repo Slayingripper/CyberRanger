@@ -24,6 +24,12 @@ services:
     # For this simple setup, we'll just run the API. 
     # In a real deployment, use supervisord or separate containers.
     command: sh -c "uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2).read()\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
     restart: unless-stopped
 
   frontend:
@@ -35,6 +41,9 @@ services:
     volumes:
       - ./frontend:/app
       - /app/node_modules
+    depends_on:
+      backend:
+        condition: service_healthy
     environment:
       - VITE_API_URL=http://localhost:8001/api
     # This is a dev setup. For production, build and serve with nginx.

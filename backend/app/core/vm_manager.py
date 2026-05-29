@@ -123,46 +123,95 @@ class VMManager:
             for name in self.conn.listDefinedDomains():
                 domain_names.append(name)
             for name in domain_names:
-                try:
-                    dom = self.conn.lookupByName(name)
-                except libvirt.libvirtError:
-                    continue
-                iface_info: List[Dict[str, Any]] = []
-                try:
-                    addrs = dom.interfaceAddresses(libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_LEASE, 0)
-                except libvirt.libvirtError:
-                    addrs = {}
-                try:
-                    xml_desc = dom.XMLDesc(0)
-                    root = ET.fromstring(xml_desc)
-                    mac_to_net: Dict[str, str] = {}
-                    for iface in root.findall("./devices/interface"):
-                        mac_el = iface.find("mac")
-                        src_el = iface.find("source")
-                        if mac_el is not None and src_el is not None:
-                            mac = mac_el.get("address")
-                            net = src_el.get("network") or src_el.get("bridge")
-                            if mac and net:
-                                mac_to_net[mac.lower()] = net
-                except Exception:
-                    mac_to_net = {}
-                for ifname, data in (addrs or {}).items():
-                    mac = data.get("hwaddr")
-                    addrs_list: List[str] = []
-                    for a in data.get("addrs", []) or []:
-                        ip = a.get("addr")
-                        if ip:
-                            addrs_list.append(ip)
-                    iface_info.append({
-                        "name": ifname,
-                        "mac": mac,
-                        "network": mac_to_net.get(mac.lower()) if mac else None,
-                        "ips": addrs_list,
-                    })
+                iface_info = self.get_domain_interfaces(name)
                 results.append({"name": name, "interfaces": iface_info})
         except libvirt.libvirtError:
             pass
         return results
+
+    def get_domain_interfaces(self, name: str) -> List[Dict[str, Any]]:
+        if not self.conn:
+            self.connect()
+        if not self.conn:
+            return []
+        try:
+            dom = self.conn.lookupByName(name)
+        except Exception:
+            return []
+
+        iface_info: List[Dict[str, Any]] = []
+        try:
+            addrs = dom.interfaceAddresses(libvirt.VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_LEASE, 0)
+        except libvirt.libvirtError:
+            addrs = {}
+
+        try:
+            xml_desc = dom.XMLDesc(0)
+            root = ET.fromstring(xml_desc)
+            mac_to_net: Dict[str, str] = {}
+            for iface in root.findall("./devices/interface"):
+                mac_el = iface.find("mac")
+                src_el = iface.find("source")
+                if mac_el is not None and src_el is not None:
+                    mac = mac_el.get("address")
+                    net = src_el.get("network") or src_el.get("bridge")
+                    if mac and net:
+                        mac_to_net[mac.lower()] = net
+        except Exception:
+            mac_to_net = {}
+
+        for ifname, data in (addrs or {}).items():
+            mac = data.get("hwaddr")
+            addrs_list: List[str] = []
+            for addr in data.get("addrs", []) or []:
+                ip = addr.get("addr")
+                if ip:
+                    addrs_list.append(ip)
+            iface_info.append(
+                {
+                    "name": ifname,
+                    "mac": mac,
+                    "network": mac_to_net.get(mac.lower()) if mac else None,
+                    "ips": addrs_list,
+                }
+            )
+        return iface_info
+
+    def wait_for_primary_ipv4(self, vm_name: str, timeout_seconds: float = 180.0, poll_interval_seconds: float = 5.0) -> Optional[str]:
+        return self.wait_for_preferred_ipv4(
+            vm_name,
+            preferred_networks=None,
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+        )
+
+    def wait_for_preferred_ipv4(
+        self,
+        vm_name: str,
+        preferred_networks: Optional[List[str]] = None,
+        timeout_seconds: float = 180.0,
+        poll_interval_seconds: float = 5.0,
+    ) -> Optional[str]:
+        preferred = [str(name or "").strip() for name in (preferred_networks or []) if str(name or "").strip()]
+        deadline = time.time() + max(1.0, float(timeout_seconds or 0.0))
+        fallback_ip: Optional[str] = None
+        while time.time() < deadline:
+            for iface in self.get_domain_interfaces(vm_name):
+                for raw_ip in iface.get("ips") or []:
+                    try:
+                        parsed = ipaddress.ip_address(str(raw_ip))
+                    except ValueError:
+                        continue
+                    if parsed.version != 4 or parsed.is_loopback or parsed.is_link_local:
+                        continue
+                    ip_text = str(parsed)
+                    network_name = str(iface.get("network") or "").strip()
+                    if not preferred or network_name in preferred:
+                        return ip_text
+                    if fallback_ip is None:
+                        fallback_ip = ip_text
+            time.sleep(max(0.2, float(poll_interval_seconds or 0.0)))
+        return fallback_ip
 
     def _get_domain_info(self, dom):
         state, maxmem, mem, cpus, cput = dom.info()

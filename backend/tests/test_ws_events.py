@@ -1,9 +1,23 @@
 import os
 import json
 import asyncio
+import sys
+import types
 import uuid
 from fastapi.testclient import TestClient
+
+libvirt_stub = types.SimpleNamespace(
+    libvirtError=RuntimeError,
+    open=lambda _uri: object(),
+    VIR_DOMAIN_INTERFACE_ADDRESSES_SRC_LEASE=0,
+    VIR_KEYCODE_SET_LINUX=0,
+)
+sys.modules.pop("libvirt", None)
+sys.modules["libvirt"] = libvirt_stub
+
 from app.main import app
+from app.core.auth import get_current_user_from_token
+from app.core.deploy_jobs import new_job
 from app.core.event_bus import event_bus
 from app.core.vm_manager import WORK_DIR
 
@@ -57,8 +71,25 @@ def test_ws_receives_publish_by_definition_level():
 
     with client.websocket_connect(f"/api/ws/training-runs/{run_id}?token={token}") as ws:
         # publish event for definition/level (async helper)
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             event_bus.publish_by_definition_level(training['id'], 0, {"type": "deploy", "ts": 1, "result": []})
         )
         msg = ws.receive_json()
         assert msg['type'] == 'deploy'
+
+
+def test_deploy_job_ws_receives_runbook_events():
+    _headers, token = auth_headers("deploy-ws-user")
+    current_user = get_current_user_from_token(token)
+    job = new_job(initial_progress={"owner_id": current_user.id, "owner_username": current_user.username})
+
+    with client.websocket_connect(f"/api/ws/deploy-jobs/{job.id}?token={token}") as ws:
+        asyncio.run(
+            event_bus.publish(
+                job.id,
+                {"type": "runbook_step", "ts": 1, "detail": {"title": "Replay simulation", "status": "running"}},
+            )
+        )
+        msg = ws.receive_json()
+        assert msg["type"] == "runbook_step"
+        assert msg["detail"]["title"] == "Replay simulation"

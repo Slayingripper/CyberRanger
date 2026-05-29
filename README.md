@@ -81,6 +81,8 @@ A lightweight, No B.S., scalable Cyber Range platform using QEMU/KVM.
 - **Range Mapper**: set `RANGE_MAPPER_ENABLE=1` to allow scans.
 - **Secure Image Downloads**: `scenario.sources` and `/api/images/download` now support optional `sha256`, `archive_sha256`, `min_bytes`, and `extract` metadata. HTTPS is required by default; set `CYBERANGE_ALLOW_HTTP_DOWNLOADS=1` only for trusted internal mirrors.
 - **VM Credentials**: image-backed deployments now generate per-VM credentials by default instead of using the old shared `user/password` fallback. Override only if you intentionally want fixed credentials.
+- **Runbook VM Agents**: post-deploy runbook jobs can request `execution_mode=actor_parallel` and `agent_mode=prefer|require` on `POST /api/deployments/{deployment_id}/runbook-jobs`. The backend will bootstrap a lightweight per-VM agent over SSH on reachable guests, reuse the shared agent mesh for control traffic, and keep command execution attached to the guest instead of a single SSH session.
+- **Direct Guest Task Control**: long-running guest processes can be managed through `POST /api/deployments/{deployment_id}/vm-agents/{node_id}/tasks`, `GET /api/deployments/{deployment_id}/vm-agents/{node_id}/tasks/{task_id}`, and `DELETE /api/deployments/{deployment_id}/vm-agents/{node_id}/tasks/{task_id}`.
 - **OpenWrt Auto-Download (optional)**:
    - `OPENWRT_IMAGE_URL` (e.g. OpenWrt x86_64 `*.img.gz`)
    - `OPENWRT_IMAGE_FILENAME` (download filename)
