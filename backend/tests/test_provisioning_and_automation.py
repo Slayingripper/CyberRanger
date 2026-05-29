@@ -168,6 +168,51 @@ def test_execute_automation_steps_runs_text_and_key_sequence():
     assert sent.count(("key", "vm-1", "enter")) == 2
 
 
+def test_vm_manager_get_domain_interfaces_uses_network_dhcp_leases_when_domain_addrs_are_empty(monkeypatch):
+    class FakeNetwork:
+        def DHCPLeases(self):
+            return [{"mac": "52:54:00:aa:bb:cc", "ipaddr": "10.66.0.15", "prefix": 24}]
+
+    class FakeDomain:
+        def interfaceAddresses(self, _source, _flags):
+            return {}
+
+        def XMLDesc(self, _flags):
+            return """
+            <domain>
+              <devices>
+                <interface type='network'>
+                  <mac address='52:54:00:aa:bb:cc'/>
+                  <source network='cyberange-test-agent'/>
+                  <target dev='vnet7'/>
+                </interface>
+              </devices>
+            </domain>
+            """
+
+    class FakeConn:
+        def lookupByName(self, name):
+            assert name == "vm-lease"
+            return FakeDomain()
+
+        def networkLookupByName(self, name):
+            assert name == "cyberange-test-agent"
+            return FakeNetwork()
+
+    monkeypatch.setattr(routes_api.vm_manager, "conn", FakeConn())
+
+    interfaces = routes_api.vm_manager.get_domain_interfaces("vm-lease")
+
+    assert interfaces == [
+        {
+            "name": "vnet7",
+            "mac": "52:54:00:aa:bb:cc",
+            "network": "cyberange-test-agent",
+            "ips": ["10.66.0.15"],
+        }
+    ]
+
+
 def test_plan_topology_network_assignments_adds_agent_mesh_for_runbook(monkeypatch):
     ensured = []
 
@@ -408,6 +453,188 @@ def test_runbook_job_replays_simulation_for_existing_deployment(monkeypatch):
     assert stored_job.result["deployment_id"] == deployment_id
     assert ssh_calls[0]["host"] == "10.20.0.10"
     assert ssh_calls[0]["command"] == "ping -c 1 10.20.0.20"
+
+
+def test_runbook_job_reuses_saved_node_hosts_when_live_ip_lookup_is_empty(monkeypatch):
+    deployment_id = "17345678-1234-5678-9abc-def012345678"
+    deployment_prefix = routes_api._deployment_prefix(deployment_id)
+    ssh_calls = []
+
+    topology = routes_api.TopologyDeployRequest(
+        scenario=routes_api.ScenarioConfig(
+            name="Saved Node Host Replay",
+            team="purple",
+            objective="Reuse last known node hosts when live IP discovery is empty.",
+            difficulty="medium",
+            runbook=routes_api.ScenarioRunbook(
+                simulation_steps=[
+                    routes_api.ScenarioRunbookStep(
+                        title="Replay over saved host",
+                        actor="attacker",
+                        target="victim",
+                        action="Use the cached IPs when libvirt does not report fresh leases.",
+                        transport="ssh",
+                        command="ping -c 1 victim_ip",
+                    )
+                ],
+            ),
+        ),
+        nodes=[
+            routes_api.TopologyNode(
+                id="attacker",
+                label="Attacker",
+                config=routes_api.TopologyNodeConfig(image="ubuntu-20.04", cpu=2, ram=2048, assets=[]),
+            ),
+            routes_api.TopologyNode(
+                id="victim",
+                label="Victim",
+                config=routes_api.TopologyNodeConfig(image="ubuntu-20.04", cpu=2, ram=2048, assets=[]),
+            ),
+        ],
+        edges=[routes_api.TopologyEdge(id="edge-1", source="attacker", target="victim")],
+    )
+    vm_names = {
+        node.id: routes_api._scoped_vm_name(node.label, node.id, deployment_prefix)
+        for node in topology.nodes
+    }
+    deployments = {
+        deployment_id: {
+            "id": deployment_id,
+            "owner_id": "user-saved-hosts",
+            "topology": topology.dict(),
+            "node_hosts": {"attacker": "10.77.0.10", "victim": "10.77.0.20"},
+        }
+    }
+
+    monkeypatch.setattr(routes_api, "_load_deployments", lambda: deployments)
+    monkeypatch.setattr(
+        routes_api,
+        "_load_creds_cache",
+        lambda: {
+            vm_names["attacker"]: {"username": "trainee", "password": "pw-attacker"},
+            vm_names["victim"]: {"username": "trainee", "password": "pw-victim"},
+        },
+    )
+    monkeypatch.setattr(routes_api.vm_manager, "wait_for_primary_ipv4", lambda _vm_name, _timeout=180.0, _poll=5.0: None)
+    monkeypatch.setattr(
+        routes_api.vm_manager,
+        "wait_for_preferred_ipv4",
+        lambda vm_name, preferred_networks=None, timeout_seconds=180.0, poll_interval_seconds=5.0: None,
+    )
+
+    async def fake_ssh_command(**kwargs):
+        ssh_calls.append(kwargs)
+        return {"exit_status": 0, "stdout": "saved\n", "stderr": ""}
+
+    monkeypatch.setattr(routes_api, "run_ssh_command_async", fake_ssh_command)
+
+    current_user = AuthenticatedUser(
+        id="user-saved-hosts",
+        username="saved-hosts",
+        full_name="Saved Hosts",
+        role="user",
+        created_at=time.time(),
+    )
+    job = new_job(initial_progress={"owner_id": current_user.id, "owner_username": current_user.username})
+
+    asyncio.run(routes_api._run_runbook_job(job.id, deployment_id, topology, current_user, ["simulation"], "actor_parallel", "off"))
+    stored_job = asyncio.run(get_job(job.id))
+
+    assert stored_job is not None
+    assert stored_job.status == "completed"
+    assert ssh_calls[0]["host"] == "10.77.0.10"
+    assert ssh_calls[0]["command"] == "ping -c 1 10.77.0.20"
+
+
+def test_runbook_job_reports_preflight_failure_when_required_host_never_resolves(monkeypatch):
+    deployment_id = "18345678-1234-5678-9abc-def012345678"
+    deployment_prefix = routes_api._deployment_prefix(deployment_id)
+    ssh_calls = []
+
+    topology = routes_api.TopologyDeployRequest(
+        scenario=routes_api.ScenarioConfig(
+            name="Preflight Host Failure",
+            team="red",
+            objective="Fail before step execution when the attacker never gets a usable IP.",
+            difficulty="medium",
+            runbook=routes_api.ScenarioRunbook(
+                simulation_steps=[
+                    routes_api.ScenarioRunbookStep(
+                        title="Initial Access",
+                        actor="attacker",
+                        target="webserver",
+                        action="Attempt the first access step.",
+                        transport="ssh",
+                        command="curl http://webserver_ip/",
+                    )
+                ],
+            ),
+        ),
+        nodes=[
+            routes_api.TopologyNode(
+                id="attacker",
+                label="Attacker",
+                config=routes_api.TopologyNodeConfig(image="ubuntu-20.04", cpu=2, ram=2048, assets=[]),
+            ),
+            routes_api.TopologyNode(
+                id="webserver",
+                label="Webserver",
+                config=routes_api.TopologyNodeConfig(image="ubuntu-20.04", cpu=2, ram=2048, assets=[]),
+            ),
+        ],
+        edges=[routes_api.TopologyEdge(id="edge-1", source="attacker", target="webserver")],
+    )
+    vm_names = {
+        node.id: routes_api._scoped_vm_name(node.label, node.id, deployment_prefix)
+        for node in topology.nodes
+    }
+    deployments = {
+        deployment_id: {
+            "id": deployment_id,
+            "owner_id": "user-preflight",
+            "topology": topology.dict(),
+        }
+    }
+
+    monkeypatch.setattr(routes_api, "_load_deployments", lambda: deployments)
+    monkeypatch.setattr(
+        routes_api,
+        "_load_creds_cache",
+        lambda: {
+            vm_names["attacker"]: {"username": "trainee", "password": "pw-attacker"},
+            vm_names["webserver"]: {"username": "trainee", "password": "pw-webserver"},
+        },
+    )
+    monkeypatch.setattr(routes_api.vm_manager, "wait_for_primary_ipv4", lambda _vm_name, _timeout=180.0, _poll=5.0: None)
+    monkeypatch.setattr(
+        routes_api.vm_manager,
+        "wait_for_preferred_ipv4",
+        lambda vm_name, preferred_networks=None, timeout_seconds=180.0, poll_interval_seconds=5.0: None,
+    )
+
+    async def fake_ssh_command(**kwargs):
+        ssh_calls.append(kwargs)
+        return {"exit_status": 0, "stdout": "should-not-run\n", "stderr": ""}
+
+    monkeypatch.setattr(routes_api, "run_ssh_command_async", fake_ssh_command)
+
+    current_user = AuthenticatedUser(
+        id="user-preflight",
+        username="preflight",
+        full_name="Preflight",
+        role="user",
+        created_at=time.time(),
+    )
+    job = new_job(initial_progress={"owner_id": current_user.id, "owner_username": current_user.username})
+
+    asyncio.run(routes_api._run_runbook_job(job.id, deployment_id, topology, current_user, ["simulation"], "actor_parallel", "off"))
+    stored_job = asyncio.run(get_job(job.id))
+
+    assert stored_job is not None
+    assert stored_job.status == "completed"
+    assert ssh_calls == []
+    assert stored_job.progress["runbook"]["simulation"]["node_hosts"]["attacker"]["status"] == "failed"
+    assert "preflight could not resolve required node hosts" in stored_job.progress["runbook"]["simulation"]["error"]
 
 
 def test_runbook_job_executes_simulation_in_actor_parallel_lanes(monkeypatch):
@@ -1171,11 +1398,12 @@ def test_run_deploy_job_rewrites_stale_opnsense_source_before_download(tmp_path,
 def test_run_deploy_job_completes_with_warnings_when_ssh_runbook_transport_fails(tmp_path, monkeypatch):
     image_path = tmp_path / "ubuntu-20.04.qcow2"
     image_path.write_text("qcow2")
+    deployments = {}
 
     monkeypatch.setattr(routes_api, "CREDS_CACHE_PATH", str(tmp_path / "vm_credentials.json"))
     monkeypatch.setattr(routes_api, "_load_creds_cache", lambda: {})
-    monkeypatch.setattr(routes_api, "_load_deployments", lambda: {})
-    monkeypatch.setattr(routes_api, "_save_deployments", lambda _deployments: None)
+    monkeypatch.setattr(routes_api, "_load_deployments", lambda: deployments)
+    monkeypatch.setattr(routes_api, "_save_deployments", lambda saved: deployments.update(saved))
     monkeypatch.setattr(routes_api, "_resolve_image_path", lambda _image: str(image_path))
     monkeypatch.setattr(routes_api, "_plan_topology_network_assignments", lambda _topology, _slug: {"telemetry": ["default"]})
     monkeypatch.setattr(routes_api, "register_vm", lambda *args, **kwargs: None)
@@ -1257,4 +1485,85 @@ def test_run_deploy_job_completes_with_warnings_when_ssh_runbook_transport_fails
     assert "SSH execution failed for node 'telemetry' at '192.168.122.50'" in stored_job.progress["runbook"]["simulation"]["error"]
     assert stored_job.result["status"] == "deployment_processed_with_warnings"
     assert stored_job.result["runbook"]["status"] == "completed_with_errors"
+    assert stored_job.result["runbook"]["errors"][0]["phase"] == "simulation"
+    assert deployments[job.id]["node_hosts"] == {"telemetry": "192.168.122.50"}
+
+
+def test_runbook_job_fails_fast_for_gateway_command_steps_without_ssh_or_agent(monkeypatch):
+    deployment_id = "62345678-1234-5678-9abc-def012345678"
+    deployment_prefix = routes_api._deployment_prefix(deployment_id)
+
+    topology = routes_api.TopologyDeployRequest(
+        scenario=routes_api.ScenarioConfig(
+            name="Gateway Fast Failure",
+            team="blue",
+            objective="Avoid stalling on appliance gateway command steps.",
+            difficulty="medium",
+            runbook=routes_api.ScenarioRunbook(
+                simulation_steps=[
+                    routes_api.ScenarioRunbookStep(
+                        title="Replay from gateway",
+                        actor="gateway",
+                        target="victim",
+                        action="Attempt to replay traffic from the gateway appliance.",
+                        transport="ssh",
+                        command="python3 /opt/replay.py --target victim_ip",
+                        timeout_seconds=120,
+                    )
+                ],
+            ),
+        ),
+        nodes=[
+            routes_api.TopologyNode(
+                id="gateway",
+                label="Gateway",
+                config=routes_api.TopologyNodeConfig(image="gateway", cpu=2, ram=2048, assets=[]),
+            ),
+            routes_api.TopologyNode(
+                id="victim",
+                label="Victim",
+                config=routes_api.TopologyNodeConfig(image="ubuntu-20.04", cpu=2, ram=2048, assets=[]),
+            ),
+        ],
+        edges=[routes_api.TopologyEdge(id="edge-1", source="gateway", target="victim")],
+    )
+    vm_names = {
+        node.id: routes_api._scoped_vm_name(node.label, node.id, deployment_prefix)
+        for node in topology.nodes
+    }
+
+    async def fail_ensure_vm_agent_for_node(**kwargs):
+        raise AssertionError("VM agent bootstrap should not be attempted for appliance gateway nodes")
+
+    async def fail_ssh(**kwargs):
+        raise AssertionError("SSH should not be attempted for appliance gateway nodes")
+
+    monkeypatch.setattr(routes_api, "_ensure_vm_agent_for_node", fail_ensure_vm_agent_for_node)
+    monkeypatch.setattr(routes_api, "run_ssh_command_async", fail_ssh)
+    monkeypatch.setattr(
+        routes_api,
+        "_load_creds_cache",
+        lambda: {
+            vm_names["gateway"]: {"username": "trainee", "password": "pw-gateway"},
+            vm_names["victim"]: {"username": "trainee", "password": "pw-victim"},
+        },
+    )
+
+    current_user = AuthenticatedUser(
+        id="user-gateway-fast-fail",
+        username="gateway-fast-fail",
+        full_name="Gateway Fast Fail",
+        role="user",
+        created_at=time.time(),
+    )
+    job = new_job(initial_progress={"owner_id": current_user.id, "owner_username": current_user.username})
+
+    asyncio.run(routes_api._run_runbook_job(job.id, deployment_id, topology, current_user, ["simulation"], "actor_parallel", "prefer"))
+    stored_job = asyncio.run(get_job(job.id))
+
+    assert stored_job is not None
+    assert stored_job.status == "completed"
+    assert stored_job.progress["runbook"]["status"] == "completed_with_errors"
+    assert stored_job.progress["runbook"]["vm_agents"]["gateway"]["status"] == "unsupported"
+    assert "does not support the current automatic agent/SSH execution path" in stored_job.progress["runbook"]["simulation"]["error"]
     assert stored_job.result["runbook"]["errors"][0]["phase"] == "simulation"

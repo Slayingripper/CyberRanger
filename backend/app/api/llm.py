@@ -75,12 +75,12 @@ PLAN_RESPONSE_EXAMPLE = {
             "simulation_steps": [
                 {
                     "title": "Replay phishing email",
-                    "actor": "gateway",
+                    "actor": "analyst",
                     "target": "victim",
-                    "action": "Send a benign phishing lure and wait for the victim-side telemetry service to log it.",
+                    "action": "Trigger a benign phishing lure replay from the analyst workstation and wait for the victim-side telemetry service to log it.",
                     "expected_outcome": "The analyst host can review the event and the generated logs.",
                     "transport": "ssh",
-                    "command": "python3 /opt/replay_phish.py",
+                    "command": "python3 /opt/replay_phish.py --target victim_ip",
                     "timeout_seconds": 120,
                 }
             ],
@@ -136,12 +136,12 @@ TOPOLOGY_RESPONSE_EXAMPLE = {
             "simulation_steps": [
                 {
                     "title": "Replay phishing lure",
-                    "actor": "gateway",
+                    "actor": "analyst",
                     "target": "victim",
-                    "action": "Send a benign phishing lure and log the victim response.",
+                    "action": "Trigger a benign phishing lure replay from the analyst workstation and log the victim response.",
                     "expected_outcome": "The analyst host can review the event timeline.",
                     "transport": "ssh",
-                    "command": "python3 /opt/replay_phish.py",
+                    "command": "python3 /opt/replay_phish.py --target victim_ip",
                     "timeout_seconds": 120,
                 }
             ],
@@ -918,6 +918,7 @@ def _plan_messages(prompt: str, candidate_images: List[str], max_nodes: int) -> 
                 "For ISO or installer nodes, plan console automation as wait/send_text/send_key steps instead of vague manual setup. "
                 "Include a scenario.runbook that explains setup order, attack or simulation steps, visualization targets, and success criteria. "
                 "When a runbook step should execute automatically on a cloud image, add transport='ssh' plus a command and timeout_seconds. "
+                "Do not put automatic SSH command steps on gateway, router, firewall, OpenWrt, OPNsense, or other appliance-style nodes unless they are explicitly modeled as Linux cloud guests. "
                 "When a runbook step should execute automatically on an installer ISO, add step.automation using wait/send_text/send_key steps and set actor to the node receiving that console input. "
                 "Favor benign simulation, detection, and administration tooling suitable for a lab. "
                 "Return this JSON shape exactly: "
@@ -940,6 +941,7 @@ def _topology_messages(plan: Dict[str, Any], prompt: str, candidate_images: List
                 "Compile setup into node.config.assets for cloud images and node.config.automation.steps for installer ISOs. "
                 "Also include scenario.runbook with setup_steps, simulation_steps, visualizations, and success_criteria. "
                 "For any runbook step that should run automatically after deploy on a cloud image, include transport='ssh', command, and timeout_seconds. "
+                "Never assign automatic SSH command steps to gateway, router, firewall, OpenWrt, OPNsense, or other appliance nodes unless the image is explicitly a Linux cloud guest prepared for remote control. "
                 "For installer ISO nodes, include an automation object with wait/send_text/send_key steps and actor set to the node that should execute it. "
                 "The exact required response shape is: "
                 f"{json.dumps(TOPOLOGY_RESPONSE_EXAMPLE, separators=(',', ':'))}"

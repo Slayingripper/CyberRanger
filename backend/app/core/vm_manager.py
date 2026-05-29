@@ -129,6 +129,37 @@ class VMManager:
             pass
         return results
 
+    def _network_dhcp_leases_by_mac(self, network_names: List[str]) -> Dict[str, List[str]]:
+        if not self.conn:
+            self.connect()
+        if not self.conn:
+            return {}
+
+        leases_by_mac: Dict[str, List[str]] = {}
+        for network_name in dict.fromkeys([str(name or "").strip() for name in (network_names or []) if str(name or "").strip()]):
+            try:
+                net = self.conn.networkLookupByName(network_name)
+                leases = net.DHCPLeases() or []
+            except Exception:
+                continue
+
+            for lease in leases:
+                if not isinstance(lease, dict):
+                    continue
+                raw_mac = str(lease.get("mac") or lease.get("mac-address") or lease.get("macaddr") or "").strip().lower()
+                raw_ip = str(lease.get("ipaddr") or lease.get("ip-address") or lease.get("addr") or "").strip()
+                if not raw_mac or not raw_ip:
+                    continue
+                ip_text = raw_ip.split("/", 1)[0].strip()
+                try:
+                    normalized_ip = str(ipaddress.ip_address(ip_text))
+                except ValueError:
+                    continue
+                entries = leases_by_mac.setdefault(raw_mac, [])
+                if normalized_ip not in entries:
+                    entries.append(normalized_ip)
+        return leases_by_mac
+
     def get_domain_interfaces(self, name: str) -> List[Dict[str, Any]]:
         if not self.conn:
             self.connect()
@@ -148,17 +179,26 @@ class VMManager:
         try:
             xml_desc = dom.XMLDesc(0)
             root = ET.fromstring(xml_desc)
-            mac_to_net: Dict[str, str] = {}
-            for iface in root.findall("./devices/interface"):
+            mac_to_binding: Dict[str, Dict[str, Optional[str]]] = {}
+            for index, iface in enumerate(root.findall("./devices/interface")):
                 mac_el = iface.find("mac")
                 src_el = iface.find("source")
+                target_el = iface.find("target")
                 if mac_el is not None and src_el is not None:
                     mac = mac_el.get("address")
                     net = src_el.get("network") or src_el.get("bridge")
                     if mac and net:
-                        mac_to_net[mac.lower()] = net
+                        mac_to_binding[mac.lower()] = {
+                            "network": net,
+                            "name": target_el.get("dev") if target_el is not None else f"iface{index + 1}",
+                        }
         except Exception:
-            mac_to_net = {}
+            mac_to_binding = {}
+
+        lease_ips_by_mac = self._network_dhcp_leases_by_mac(
+            [binding.get("network") or "" for binding in mac_to_binding.values()]
+        )
+        seen_macs = set()
 
         for ifname, data in (addrs or {}).items():
             mac = data.get("hwaddr")
@@ -167,12 +207,34 @@ class VMManager:
                 ip = addr.get("addr")
                 if ip:
                     addrs_list.append(ip)
+            mac_key = str(mac or "").strip().lower()
+            for lease_ip in lease_ips_by_mac.get(mac_key, []):
+                if lease_ip not in addrs_list:
+                    addrs_list.append(lease_ip)
+            binding = mac_to_binding.get(mac_key) if mac_key else None
             iface_info.append(
                 {
-                    "name": ifname,
+                    "name": ifname or (binding or {}).get("name"),
                     "mac": mac,
-                    "network": mac_to_net.get(mac.lower()) if mac else None,
+                    "network": (binding or {}).get("network"),
                     "ips": addrs_list,
+                }
+            )
+            if mac_key:
+                seen_macs.add(mac_key)
+
+        for mac_key, binding in mac_to_binding.items():
+            if mac_key in seen_macs:
+                continue
+            lease_ips = list(lease_ips_by_mac.get(mac_key) or [])
+            if not lease_ips:
+                continue
+            iface_info.append(
+                {
+                    "name": binding.get("name") or f"iface{len(iface_info) + 1}",
+                    "mac": mac_key,
+                    "network": binding.get("network"),
+                    "ips": lease_ips,
                 }
             )
         return iface_info

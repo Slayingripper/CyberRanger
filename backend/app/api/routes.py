@@ -148,6 +148,68 @@ def _deployment_vm_names_by_node_id(topology: "TopologyDeployRequest", deploymen
     }
 
 
+def _topology_node_images_by_id(topology: "TopologyDeployRequest") -> Dict[str, str]:
+    return {
+        node.id: str(node.config.image or "").strip()
+        for node in topology.nodes
+    }
+
+
+def _persist_deployment_record(
+    deployment_id: str,
+    topology: "TopologyDeployRequest",
+    current_user: AuthenticatedUser,
+    vm_names_by_node_id: Dict[str, str],
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    deployments = _load_deployments()
+    existing = deployments.get(deployment_id) if isinstance(deployments.get(deployment_id), dict) else {}
+    record: Dict[str, Any] = {
+        **existing,
+        "id": deployment_id,
+        "name": topology.scenario.name if topology.scenario and topology.scenario.name else "Custom Deployment",
+        "owner_id": current_user.id,
+        "owner_username": current_user.username,
+        "timestamp": existing.get("timestamp") if isinstance(existing, dict) and existing.get("timestamp") else time.time(),
+        "vms": list(vm_names_by_node_id.values()),
+        "topology": topology.dict(),
+    }
+    if extra:
+        for key, value in extra.items():
+            if value is None:
+                continue
+            if key in {"node_hosts", "vm_agents"} and isinstance(value, dict):
+                previous = record.get(key) if isinstance(record.get(key), dict) else {}
+                record[key] = {**previous, **value}
+            else:
+                record[key] = value
+
+    deployments[deployment_id] = record
+    _save_deployments(deployments)
+    return record
+
+
+def _image_supports_guest_command_execution(image_key: str) -> bool:
+    normalized = canonicalize_image_key(image_key).strip().lower()
+    if not normalized:
+        return True
+
+    resolved_name = os.path.basename(_resolve_image_path(normalized)).strip().lower()
+    combined = " ".join(part for part in (normalized, resolved_name) if part)
+    unsupported_tokens = (
+        "gateway",
+        "vyos",
+        "opnsense",
+        "openwrt",
+        "security-onion",
+        "securityonion",
+        "contiki",
+        "windows-10",
+        "windows10",
+    )
+    return not any(token in combined for token in unsupported_tokens)
+
+
 def _normalize_runbook_phases(phases: Optional[List[str]]) -> List[str]:
     normalized: List[str] = []
     for raw_phase in phases or ["simulation"]:
@@ -1050,11 +1112,35 @@ def _deployment_vm_agents(deployment: Dict[str, Any]) -> Dict[str, Dict[str, Any
     }
 
 
+def _deployment_node_hosts(deployment: Dict[str, Any]) -> Dict[str, str]:
+    raw_hosts = deployment.get("node_hosts")
+    if not isinstance(raw_hosts, dict):
+        return {}
+    normalized: Dict[str, str] = {}
+    for node_id, value in raw_hosts.items():
+        host = str(value or "").strip()
+        if not host:
+            continue
+        try:
+            normalized[str(node_id)] = str(ipaddress.ip_address(host))
+        except ValueError:
+            continue
+    return normalized
+
+
 def _load_saved_vm_agent_state(deployment_id: str, node_id: str) -> Dict[str, Any]:
     deployment = _load_deployments().get(deployment_id)
     if not isinstance(deployment, dict):
         return {}
     return dict(_deployment_vm_agents(deployment).get(node_id) or {})
+
+
+def _load_saved_node_host(deployment_id: str, node_id: str) -> Optional[str]:
+    deployment = _load_deployments().get(deployment_id)
+    if not isinstance(deployment, dict):
+        return None
+    host = _deployment_node_hosts(deployment).get(node_id)
+    return str(host).strip() if host else None
 
 
 def _save_vm_agent_state(deployment_id: str, node_id: str, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -1074,6 +1160,26 @@ def _save_vm_agent_state(deployment_id: str, node_id: str, state: Dict[str, Any]
     return merged
 
 
+def _save_node_host(deployment_id: str, node_id: str, host: str) -> Optional[str]:
+    try:
+        normalized_host = str(ipaddress.ip_address(str(host or "").strip()))
+    except ValueError:
+        return None
+
+    deployments = _load_deployments()
+    deployment = deployments.get(deployment_id)
+    if not isinstance(deployment, dict):
+        return normalized_host
+
+    node_hosts = deployment.setdefault("node_hosts", {})
+    if not isinstance(node_hosts, dict):
+        node_hosts = {}
+        deployment["node_hosts"] = node_hosts
+    node_hosts[node_id] = normalized_host
+    _save_deployments(deployments)
+    return normalized_host
+
+
 def _collect_runbook_vm_agent_targets(
     steps: List[ScenarioRunbookStep],
     vm_names_by_node_id: Dict[str, str],
@@ -1087,6 +1193,26 @@ def _collect_runbook_vm_agent_targets(
             continue
         node_id, vm_name = resolved_target
         targets[node_id] = vm_name
+    return targets
+
+
+def _collect_runbook_phase_host_targets(
+    steps: List[ScenarioRunbookStep],
+    vm_names_by_node_id: Dict[str, str],
+    node_images_by_id: Dict[str, str],
+) -> Dict[str, str]:
+    targets: Dict[str, str] = {}
+    for step in steps:
+        if not step.command or step.automation or _normalize_runbook_transport(step.transport) == "console":
+            continue
+        resolved_target = _resolve_runbook_vm_name(step, vm_names_by_node_id)
+        if resolved_target:
+            node_id, vm_name = resolved_target
+            if not _image_supports_guest_command_execution(node_images_by_id.get(node_id, "")):
+                continue
+            targets[node_id] = vm_name
+        if step.target and step.target in vm_names_by_node_id:
+            targets[step.target] = vm_names_by_node_id[step.target]
     return targets
 
 
@@ -1168,6 +1294,8 @@ async def _ensure_vm_agent_for_node(
         vm_name=vm_name,
         node_ip_cache=node_ip_cache,
         preferred_networks=preferred_networks,
+        deployment_id=deployment_id,
+        saved_host=_load_saved_node_host(deployment_id, node_id),
     )
     saved_state = _load_saved_vm_agent_state(deployment_id, node_id)
     token = str(saved_state.get("token") or uuid.uuid4().hex)
@@ -1238,6 +1366,7 @@ async def _ensure_runbook_vm_agents(
     phase_name: str,
     steps: List[ScenarioRunbookStep],
     vm_names_by_node_id: Dict[str, str],
+    node_images_by_id: Dict[str, str],
     node_credentials_by_id: Dict[str, Dict[str, str]],
     preferred_networks: Optional[List[str]],
     agent_mode: Literal["off", "prefer", "require"],
@@ -1265,6 +1394,27 @@ async def _ensure_runbook_vm_agents(
     node_ip_cache: Dict[str, str] = {}
 
     for node_id, vm_name in targets.items():
+        image_key = str(node_images_by_id.get(node_id) or "").strip()
+        if not _image_supports_guest_command_execution(image_key):
+            message = (
+                f"Node '{node_id}' uses image '{image_key or 'unknown'}', which does not support the current automatic agent/SSH control path. "
+                "Use console automation or target a Linux cloud guest instead."
+            )
+            await set_progress_path(job_id, f"runbook.vm_agents.{node_id}.status", "unsupported")
+            await set_progress_path(job_id, f"runbook.vm_agents.{node_id}.message", message)
+            await _publish_deploy_event(
+                job_id,
+                "runbook_vm_agent",
+                phase=phase_name,
+                node_id=node_id,
+                vm_name=vm_name,
+                status="unsupported",
+                message=message,
+            )
+            if agent_mode == "require":
+                raise RuntimeError(message)
+            continue
+
         await set_progress_path(job_id, f"runbook.vm_agents.{node_id}.status", "starting")
         await _publish_deploy_event(
             job_id,
@@ -1370,10 +1520,15 @@ async def _resolve_runbook_node_ip(
     vm_name: str,
     node_ip_cache: Dict[str, str],
     preferred_networks: Optional[List[str]] = None,
+    deployment_id: Optional[str] = None,
+    saved_host: Optional[str] = None,
+    timeout_seconds: float = 180.0,
 ) -> str:
     cached = node_ip_cache.get(node_id)
     if cached:
         return cached
+
+    persisted_host = str(saved_host or "").strip()
 
     ip_address = None
     if preferred_networks:
@@ -1382,13 +1537,20 @@ async def _resolve_runbook_node_ip(
                 vm_manager.wait_for_preferred_ipv4,
                 vm_name,
                 preferred_networks,
-                180.0,
+                max(1.0, float(timeout_seconds or 0.0)),
                 5.0,
             )
         except Exception:
             ip_address = None
     if not ip_address:
-        ip_address = await asyncio.to_thread(vm_manager.wait_for_primary_ipv4, vm_name, 180.0, 5.0)
+        ip_address = await asyncio.to_thread(
+            vm_manager.wait_for_primary_ipv4,
+            vm_name,
+            max(1.0, float(timeout_seconds or 0.0)),
+            5.0,
+        )
+    if not ip_address and persisted_host:
+        ip_address = persisted_host
     if not ip_address:
         raise RuntimeError(f"Runbook step '{step_title}' could not resolve an IPv4 address for node '{node_id}'.")
 
@@ -1398,6 +1560,8 @@ async def _resolve_runbook_node_ip(
         raise RuntimeError(f"Runbook step '{step_title}' resolved a non-IP host '{ip_address}' for node '{node_id}'.") from exc
 
     node_ip_cache[node_id] = normalized_ip
+    if deployment_id:
+        _save_node_host(deployment_id, node_id, normalized_ip)
     return normalized_ip
 
 
@@ -1412,16 +1576,20 @@ async def _execute_runbook_phase(
     *,
     job_id: str,
     phase_name: str,
+    deployment_id: Optional[str],
     steps: List[ScenarioRunbookStep],
     vm_names_by_node_id: Dict[str, str],
+    node_images_by_id: Dict[str, str],
     node_credentials_by_id: Dict[str, Dict[str, str]],
     preferred_networks: Optional[List[str]] = None,
     execution_mode: Literal["sequential", "actor_parallel"] = "sequential",
     vm_agents_by_node_id: Optional[Dict[str, Dict[str, Any]]] = None,
     agent_mode: Literal["off", "prefer", "require"] = "off",
+    saved_node_hosts_by_id: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     node_ip_cache: Dict[str, str] = {}
     vm_agents_by_node_id = vm_agents_by_node_id or {}
+    saved_node_hosts_by_id = saved_node_hosts_by_id or {}
 
     if not steps:
         await set_progress_path(job_id, f"runbook.{phase_name}.execution_mode", execution_mode)
@@ -1434,6 +1602,68 @@ async def _execute_runbook_phase(
     await set_progress_path(job_id, f"runbook.{phase_name}.status", "running")
     await set_progress_path(job_id, f"runbook.{phase_name}.execution_mode", execution_mode)
     await _publish_deploy_event(job_id, "runbook_phase", phase=phase_name, status="running", execution_mode=execution_mode)
+
+    preflight_targets = _collect_runbook_phase_host_targets(steps, vm_names_by_node_id, node_images_by_id)
+    if preflight_targets:
+        await set_progress_path(
+            job_id,
+            f"runbook.{phase_name}.node_hosts",
+            {
+                node_id: {"status": "pending", "vm_name": vm_name}
+                for node_id, vm_name in preflight_targets.items()
+            },
+        )
+        preflight_errors: List[str] = []
+        for node_id, vm_name in preflight_targets.items():
+            await set_progress_path(job_id, f"runbook.{phase_name}.node_hosts.{node_id}.status", "resolving")
+            await _publish_deploy_event(
+                job_id,
+                "runbook_node_host",
+                phase=phase_name,
+                node_id=node_id,
+                vm_name=vm_name,
+                status="resolving",
+            )
+            try:
+                resolved_host = await _resolve_runbook_node_ip(
+                    step_title=f"{phase_name.title()} host preflight",
+                    node_id=node_id,
+                    vm_name=vm_name,
+                    node_ip_cache=node_ip_cache,
+                    preferred_networks=preferred_networks,
+                    deployment_id=deployment_id,
+                    saved_host=saved_node_hosts_by_id.get(node_id),
+                    timeout_seconds=300.0,
+                )
+                await set_progress_path(job_id, f"runbook.{phase_name}.node_hosts.{node_id}.status", "ready")
+                await set_progress_path(job_id, f"runbook.{phase_name}.node_hosts.{node_id}.host", resolved_host)
+                await _publish_deploy_event(
+                    job_id,
+                    "runbook_node_host",
+                    phase=phase_name,
+                    node_id=node_id,
+                    vm_name=vm_name,
+                    status="ready",
+                    host=resolved_host,
+                )
+            except RuntimeError as exc:
+                message = str(exc)
+                preflight_errors.append(f"{node_id}: {message}")
+                await set_progress_path(job_id, f"runbook.{phase_name}.node_hosts.{node_id}.status", "failed")
+                await set_progress_path(job_id, f"runbook.{phase_name}.node_hosts.{node_id}.message", message)
+                await _publish_deploy_event(
+                    job_id,
+                    "runbook_node_host",
+                    phase=phase_name,
+                    node_id=node_id,
+                    vm_name=vm_name,
+                    status="failed",
+                    message=message,
+                )
+        if preflight_errors:
+            raise RuntimeError(
+                f"Runbook phase '{phase_name}' preflight could not resolve required node hosts: {'; '.join(preflight_errors)}"
+            )
 
     async def _execute_step(index: int, step: ScenarioRunbookStep) -> Dict[str, Any]:
         step_key = str(index)
@@ -1487,6 +1717,31 @@ async def _execute_runbook_phase(
                     raise RuntimeError(msg)
 
                 node_id, vm_name = target
+                image_key = str(node_images_by_id.get(node_id) or "").strip()
+                requested_transport = _normalize_runbook_transport(step.transport)
+                if requested_transport != "console" and not _image_supports_guest_command_execution(image_key):
+                    msg = (
+                        f"Runbook step '{step.title}' targets node '{node_id}' with image '{image_key or 'unknown'}', "
+                        "which does not support the current automatic agent/SSH execution path. "
+                        "Use console automation or target a Linux cloud guest instead."
+                    )
+                    await set_progress_path(job_id, f"{step_path}.status", "failed")
+                    await set_progress_path(job_id, f"{step_path}.message", msg)
+                    await set_progress_path(job_id, f"{step_path}.finished_at", time.time())
+                    await _publish_deploy_event(
+                        job_id,
+                        "runbook_step",
+                        phase=phase_name,
+                        step_index=step_number,
+                        title=step.title,
+                        status="failed",
+                        message=msg,
+                        node_id=node_id,
+                        vm_name=vm_name,
+                        transport=requested_transport,
+                    )
+                    raise RuntimeError(msg)
+
                 credentials = node_credentials_by_id.get(node_id) or {}
                 username = str(credentials.get("username") or "").strip()
                 password = str(credentials.get("password") or "").strip()
@@ -1525,6 +1780,8 @@ async def _execute_runbook_phase(
                         vm_name=vm_name,
                         node_ip_cache=node_ip_cache,
                         preferred_networks=preferred_networks,
+                        deployment_id=deployment_id,
+                        saved_host=saved_node_hosts_by_id.get(node_id),
                     )
                 except RuntimeError as exc:
                     msg = str(exc)
@@ -1559,6 +1816,8 @@ async def _execute_runbook_phase(
                             vm_name=target_vm_name,
                             node_ip_cache=node_ip_cache,
                             preferred_networks=preferred_networks,
+                            deployment_id=deployment_id,
+                            saved_host=saved_node_hosts_by_id.get(step.target),
                         )
                         command_replacements.update(
                             {
@@ -1570,7 +1829,6 @@ async def _execute_runbook_phase(
                         )
                 rendered_command = _render_runbook_command(command_text, command_replacements)
 
-                requested_transport = _normalize_runbook_transport(step.transport)
                 actual_transport = requested_transport
                 remote_host = ip_address
                 command_result: Optional[Dict[str, Any]] = None
@@ -2002,6 +2260,14 @@ async def _run_runbook_job(
     await _publish_deploy_event(job_id, "deploy_status", status="running", phase="runbook", message="Starting scenario run")
 
     vm_names_by_node_id = _deployment_vm_names_by_node_id(topology, deployment_id)
+    node_images_by_id = _topology_node_images_by_id(topology)
+    deployment_record = _load_deployments().get(deployment_id)
+    saved_node_hosts_by_id = _deployment_node_hosts(deployment_record) if isinstance(deployment_record, dict) else {}
+    if isinstance(deployment_record, dict):
+        for node_id, agent_state in _deployment_vm_agents(deployment_record).items():
+            host = str(agent_state.get("host") or "").strip()
+            if host and node_id not in saved_node_hosts_by_id:
+                saved_node_hosts_by_id[node_id] = host
     creds_cache = _load_creds_cache()
     node_credentials_by_id = {
         node_id: creds_cache.get(vm_name) or {}
@@ -2050,10 +2316,13 @@ async def _run_runbook_job(
                 setup_results = await _execute_runbook_phase(
                     job_id=job_id,
                     phase_name="setup",
+                    deployment_id=deployment_id,
                     steps=list(runbook.setup_steps or []),
                     vm_names_by_node_id=vm_names_by_node_id,
+                    node_images_by_id=node_images_by_id,
                     node_credentials_by_id=node_credentials_by_id,
                     preferred_networks=preferred_runbook_networks,
+                    saved_node_hosts_by_id=saved_node_hosts_by_id,
                 )
             except Exception as exc:
                 runbook_errors.append({"phase": "setup", "message": str(exc)})
@@ -2071,20 +2340,28 @@ async def _run_runbook_job(
                         phase_name="simulation",
                         steps=list(runbook.simulation_steps or []),
                         vm_names_by_node_id=vm_names_by_node_id,
+                        node_images_by_id=node_images_by_id,
                         node_credentials_by_id=node_credentials_by_id,
                         preferred_networks=preferred_runbook_networks,
                         agent_mode=agent_mode,
                     )
+                    for node_id, agent_state in simulation_vm_agents.items():
+                        host = str(agent_state.get("host") or "").strip()
+                        if host:
+                            saved_node_hosts_by_id[node_id] = host
                     simulation_results = await _execute_runbook_phase(
                         job_id=job_id,
                         phase_name="simulation",
+                        deployment_id=deployment_id,
                         steps=list(runbook.simulation_steps or []),
                         vm_names_by_node_id=vm_names_by_node_id,
+                        node_images_by_id=node_images_by_id,
                         node_credentials_by_id=node_credentials_by_id,
                         preferred_networks=preferred_runbook_networks,
                         execution_mode=simulation_execution_mode,
                         vm_agents_by_node_id=simulation_vm_agents,
                         agent_mode=agent_mode,
+                        saved_node_hosts_by_id=saved_node_hosts_by_id,
                     )
                 except Exception as exc:
                     runbook_errors.append({"phase": "simulation", "message": str(exc)})
@@ -2161,6 +2438,7 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest, current_
         slug = _network_slug(topology.scenario, suffix=(job_id.split("-")[0] if job_id else None))
         node_networks = _plan_topology_network_assignments(topology, slug)
         preferred_runbook_networks = _runbook_preferred_networks(topology, slug)
+        node_images_by_id = _topology_node_images_by_id(topology)
 
         # Pre-ensure any scenario sources referenced by nodes (cached; emits progress)
         sources = topology.scenario.sources if topology.scenario and topology.scenario.sources else {}
@@ -2385,6 +2663,11 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest, current_
                 await set_progress_path(job_id, f"nodes.{node.id}.status", "error")
                 await set_progress_path(job_id, f"nodes.{node.id}.message", res.get("message") or "failed")
 
+        try:
+            _persist_deployment_record(job_id, topology, current_user, vm_names_by_node_id)
+        except Exception as exc:
+            logger.error("Failed to persist deployment record before runbook: %s", exc)
+
         if node_automation_tasks:
             await update_progress(job_id, {"phase": "node_automation"})
             await update_job(job_id, message="Waiting for installer automation")
@@ -2411,8 +2694,10 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest, current_
                 setup_results = await _execute_runbook_phase(
                     job_id=job_id,
                     phase_name="setup",
+                    deployment_id=job_id,
                     steps=list(runbook.setup_steps or []),
                     vm_names_by_node_id=vm_names_by_node_id,
+                    node_images_by_id=node_images_by_id,
                     node_credentials_by_id=node_credentials_by_id,
                     preferred_networks=preferred_runbook_networks,
                 )
@@ -2426,8 +2711,10 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest, current_
                     simulation_results = await _execute_runbook_phase(
                         job_id=job_id,
                         phase_name="simulation",
+                        deployment_id=job_id,
                         steps=list(runbook.simulation_steps or []),
                         vm_names_by_node_id=vm_names_by_node_id,
+                        node_images_by_id=node_images_by_id,
                         node_credentials_by_id=node_credentials_by_id,
                         preferred_networks=preferred_runbook_networks,
                     )
@@ -2454,21 +2741,19 @@ async def _run_deploy_job(job_id: str, topology: TopologyDeployRequest, current_
 
         # Save deployment record
         try:
-            deployments = _load_deployments()
-            vm_names = []
-            for node in topology.nodes:
-                 vm_names.append(_scoped_vm_name(node.label, node.id, deployment_prefix))
-            
-            deployments[job_id] = {
-                "id": job_id,
-                "name": topology.scenario.name if topology.scenario and topology.scenario.name else "Custom Deployment",
-                "owner_id": current_user.id,
-                "owner_username": current_user.username,
-                "timestamp": time.time(),
-                "vms": vm_names,
-                "topology": topology.dict()
-            }
-            _save_deployments(deployments)
+            extra: Dict[str, Any] = {}
+            if runbook_result and isinstance(runbook_result, dict):
+                vm_agents = runbook_result.get("vm_agents") if isinstance(runbook_result.get("vm_agents"), dict) else {}
+                if vm_agents:
+                    extra["vm_agents"] = vm_agents
+                node_hosts = {
+                    str(entry.get("node_id")): str(entry.get("host"))
+                    for entry in list(runbook_result.get("setup_results") or []) + list(runbook_result.get("simulation_results") or [])
+                    if isinstance(entry, dict) and entry.get("node_id") and entry.get("host")
+                }
+                if node_hosts:
+                    extra["node_hosts"] = node_hosts
+            _persist_deployment_record(job_id, topology, current_user, vm_names_by_node_id, extra)
         except Exception as e:
             logger.error("Failed to save deployment record: %s", e)
 
